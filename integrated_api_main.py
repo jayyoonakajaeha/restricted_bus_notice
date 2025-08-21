@@ -470,9 +470,9 @@ async def bus_info_webhook(req: Request):
     except Exception as e:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"버스 정보 조회 중 오류가 발생했습니다: {str(e)}"}}]}}
 
-@app.post("/webhook/route_check", tags=["카카오톡"])
-async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
-    """특정 노선 통제 정보 조회 (올바른 카카오톡 콜백)"""
+@app.post("/webhook/route_image", tags=["카카오톡"])
+async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
+    """노선 우회 경로 이미지 전송 (올바른 카카오톡 콜백)"""
     body = await req.json()
     
     if 'userRequest' not in body:
@@ -483,51 +483,22 @@ async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
     target_date = params.get('date', '').strip()
     
     if not route_number:
-        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 7016"}}]}}
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 9401"}}]}}
     
     if not target_date:
         target_date = datetime.now().strftime("%Y-%m-%d")
     
     if not CRAWLER_AVAILABLE or not cached_notices:
-        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 버스 정보 서비스를 사용할 수 없습니다."}}]}}
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 서비스를 사용할 수 없습니다."}}]}}
     
     try:
-        controls = crawler.get_control_info_by_route(cached_notices, target_date, route_number)
-        
-        if not controls:
-            return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"🚌 노선 {route_number}번\n{target_date} 통제 정보가 없습니다. ✅"}}]}}
-        
-        response_text = f"🚨 노선 {route_number}번 통제 정보\n📅 {target_date}\n\n"
-        
-        for i, control in enumerate(controls, 1):
-            response_text += f"【{i}】 {control.get('control_type', '통제')}\n"
-            title = control.get('notice_title', '제목 없음')
-            if len(title) > 40:
-                title = title[:40] + "..."
-            response_text += f"📄 {title}\n"
-            
-            stations = control.get('affected_stations', [])
-            if stations:
-                station_names = [s.get('station_name', '이름없음') for s in stations[:3]]
-                response_text += f"🚏 영향 정류소: {', '.join(station_names)}"
-                if len(stations) > 3:
-                    response_text += f" 외 {len(stations)-3}곳"
-                response_text += "\n"
-            
-            detour = control.get('detour_path', '')
-            if detour:
-                if len(detour) > 50:
-                    detour = detour[:50] + "..."
-                response_text += f"🔄 우회: {detour}\n"
-            
-            response_text += "\n"
-        
-        # 이미지 확인 및 생성
-        route_image_url = None
+        # 해당 날짜의 노선 통제 정보 찾기
         filtered_notices = crawler.filter_by_date(cached_notices, target_date)
-        target_notice = None
+        
+        route_image_url = None
         notice_title = None
         detour_path = None
+        target_notice = None
         
         # 1단계: 기존 이미지 확인
         for notice in filtered_notices:
@@ -633,6 +604,134 @@ async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
             
     except Exception as e:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"이미지 조회 중 오류: {str(e)}"}}]}}
+
+@app.post("/webhook/route_check", tags=["카카오톡"])
+async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
+    """특정 노선 통제 정보 조회 (올바른 카카오톡 콜백)"""
+    body = await req.json()
+    
+    if 'userRequest' not in body:
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "잘못된 요청입니다."}}]}}
+    
+    params = body.get('action', {}).get('params', {})
+    route_number = params.get('route_number', '').strip()
+    target_date = params.get('date', '').strip()
+    
+    if not route_number:
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 7016"}}]}}
+    
+    if not target_date:
+        target_date = datetime.now().strftime("%Y-%m-%d")
+    
+    if not CRAWLER_AVAILABLE or not cached_notices:
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 버스 정보 서비스를 사용할 수 없습니다."}}]}}
+    
+    try:
+        controls = crawler.get_control_info_by_route(cached_notices, target_date, route_number)
+        
+        if not controls:
+            return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"🚌 노선 {route_number}번\n{target_date} 통제 정보가 없습니다. ✅"}}]}}
+        
+        response_text = f"🚨 노선 {route_number}번 통제 정보\n📅 {target_date}\n\n"
+        
+        for i, control in enumerate(controls, 1):
+            response_text += f"【{i}】 {control.get('control_type', '통제')}\n"
+            title = control.get('notice_title', '제목 없음')
+            if len(title) > 40:
+                title = title[:40] + "..."
+            response_text += f"📄 {title}\n"
+            
+            stations = control.get('affected_stations', [])
+            if stations:
+                station_names = [s.get('station_name', '이름없음') for s in stations[:3]]
+                response_text += f"🚏 영향 정류소: {', '.join(station_names)}"
+                if len(stations) > 3:
+                    response_text += f" 외 {len(stations)-3}곳"
+                response_text += "\n"
+            
+            detour = control.get('detour_path', '')
+            if detour:
+                if len(detour) > 50:
+                    detour = detour[:50] + "..."
+                response_text += f"🔄 우회: {detour}\n"
+            
+            response_text += "\n"
+        
+        # 이미지 확인 및 생성
+        route_image_url = None
+        filtered_notices = crawler.filter_by_date(cached_notices, target_date)
+        target_notice = None
+        notice_title = None
+        detour_path = None
+        
+        # 1단계: 기존 이미지 확인
+        for notice in filtered_notices:
+            route_images = notice.get('route_images', {})
+            if route_number in route_images:
+                image_path = route_images[route_number]
+                if image_path and os.path.exists(image_path):
+                    filename = os.path.basename(image_path)
+                    base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
+                    route_image_url = f"{base_url}/static/route_images/{filename}"
+                    break
+            
+            # 해당 노선이 포함된 공지사항 찾기
+            route_pages = notice.get('route_pages', {})
+            if route_number in route_pages:
+                target_notice = notice
+                notice_title = notice.get('title', '제목 없음')
+                detour_routes = notice.get('detour_routes', {})
+                detour_path = detour_routes.get(route_number, '')
+        
+        # 2단계: 기존 이미지가 있으면 텍스트 + 이미지 함께 전송
+        if route_image_url:
+            return {
+                "version": "2.0",
+                "template": {
+                    "outputs": [
+                        {"simpleText": {"text": response_text}},
+                        {
+                            "simpleImage": {
+                                "imageUrl": route_image_url,
+                                "altText": f"{route_number}번 버스 우회 경로"
+                            }
+                        }
+                    ]
+                }
+            }
+        
+        # 3단계: 이미지가 없으면 처리
+        elif target_notice:
+            # 콜백 URL 확인
+            callback_url = body.get('userRequest', {}).get('callbackUrl')
+            
+            if callback_url:
+                # 백그라운드에서 이미지 생성 후 콜백 전송
+                background_tasks.add_task(
+                    generate_and_send_kakao_callback,
+                    route_number, target_date, target_notice, callback_url, notice_title, detour_path
+                )
+                
+                # 카카오톡 콜백 활성화 응답
+                return {
+                    "version": "2.0",
+                    "useCallback": True,
+                    "data": {
+                        "text": f"🖼️ 우회 경로 이미지를 생성 중입니다...\n잠시 후 이미지가 추가로 전송됩니다."
+                    }
+                }
+            else:
+                # 콜백이 없으면 안내 메시지 추가
+                response_text += "\n💡 상세한 이미지를 보려면 관리자에게 콜백 설정을 요청하세요."
+            
+            return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": response_text}}]}}
+        
+        else:
+            # 텍스트만 전송
+            return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": response_text}}]}}
+        
+    except Exception as e:
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"노선 정보 조회 중 오류: {str(e)}"}}]}}
 
 @app.post("/webhook/location_save", tags=["카카오톡"])
 async def location_save_webhook(req: Request, background_tasks: BackgroundTasks):
@@ -783,103 +882,4 @@ async def get_statistics():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port) in route_images:
-                image_path = route_images[route_number]
-                if image_path and os.path.exists(image_path):
-                    filename = os.path.basename(image_path)
-                    base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                    route_image_url = f"{base_url}/static/route_images/{filename}"
-                    break
-            
-            # 해당 노선이 포함된 공지사항 찾기
-            route_pages = notice.get('route_pages', {})
-            if route_number in route_pages:
-                target_notice = notice
-                notice_title = notice.get('title', '제목 없음')
-                detour_routes = notice.get('detour_routes', {})
-                detour_path = detour_routes.get(route_number, '')
-        
-        # 2단계: 기존 이미지가 있으면 텍스트 + 이미지 함께 전송
-        if route_image_url:
-            return {
-                "version": "2.0",
-                "template": {
-                    "outputs": [
-                        {"simpleText": {"text": response_text}},
-                        {
-                            "simpleImage": {
-                                "imageUrl": route_image_url,
-                                "altText": f"{route_number}번 버스 우회 경로"
-                            }
-                        }
-                    ]
-                }
-            }
-        
-        # 3단계: 이미지가 없으면 처리
-        elif target_notice:
-            # 콜백 URL 확인
-            callback_url = body.get('userRequest', {}).get('callbackUrl')
-            
-            if callback_url:
-                # 백그라운드에서 이미지 생성 후 콜백 전송
-                background_tasks.add_task(
-                    generate_and_send_kakao_callback,
-                    route_number, target_date, target_notice, callback_url, notice_title, detour_path
-                )
-                
-                # 카카오톡 콜백 활성화 응답
-                return {
-                    "version": "2.0",
-                    "useCallback": True,
-                    "data": {
-                        "text": f"🖼️ 우회 경로 이미지를 생성 중입니다...\n잠시 후 이미지가 추가로 전송됩니다."
-                    }
-                }
-            else:
-                # 콜백이 없으면 안내 메시지 추가
-                response_text += "\n💡 상세한 이미지를 보려면 관리자에게 콜백 설정을 요청하세요."
-            
-            return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": response_text}}]}}
-        
-        else:
-            # 텍스트만 전송
-            return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": response_text}}]}}
-        
-    except Exception as e:
-        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"노선 정보 조회 중 오류: {str(e)}"}}]}}
-
-@app.post("/webhook/route_image", tags=["카카오톡"])
-async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
-    """노선 우회 경로 이미지 전송 (올바른 카카오톡 콜백)"""
-    body = await req.json()
-    
-    if 'userRequest' not in body:
-        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "잘못된 요청입니다."}}]}}
-    
-    params = body.get('action', {}).get('params', {})
-    route_number = params.get('route_number', '').strip()
-    target_date = params.get('date', '').strip()
-    
-    if not route_number:
-        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 9401"}}]}}
-    
-    if not target_date:
-        target_date = datetime.now().strftime("%Y-%m-%d")
-    
-    if not CRAWLER_AVAILABLE or not cached_notices:
-        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 서비스를 사용할 수 없습니다."}}]}}
-    
-    try:
-        # 해당 날짜의 노선 통제 정보 찾기
-        filtered_notices = crawler.filter_by_date(cached_notices, target_date)
-        
-        route_image_url = None
-        notice_title = None
-        detour_path = None
-        target_notice = None
-        
-        # 1단계: 기존 이미지 확인
-        for notice in filtered_notices:
-            route_images = notice.get('route_images', {})
-            if route_number
+    uvicorn.run(app, host="0.0.0.0", port=port)
