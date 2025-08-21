@@ -521,7 +521,7 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                 if image_path and os.path.exists(image_path):
                     filename = os.path.basename(image_path)
                     base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                    route_image_url = f"{base_url}/topis_attachments/route_images/{filename}"
+                    route_image_url = f"{base_url}/static/route_images/{filename}"
                     notice_title = notice.get('title', '제목 없음')
                     
                     # 우회 경로 정보도 가져오기
