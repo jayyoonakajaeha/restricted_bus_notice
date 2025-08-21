@@ -279,6 +279,7 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
             
             callback_message = {
                 "version": "2.0",
+                "useCallback": True,
                 "template": {
                     "outputs": [
                         {"simpleText": {"text": info_text}},
@@ -538,7 +539,7 @@ async def bus_info_webhook(req: Request):
 
 @app.post("/webhook/route_image", tags=["카카오톡"])
 async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
-    """노선 우회 경로 이미지 전송 (올바른 카카오톡 콜백)"""
+    """노선 우회 경로 이미지 전송 (즉시 응답 방식)"""
     body = await req.json()
     
     if 'userRequest' not in body:
@@ -552,13 +553,12 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 9401"}}]}}
     
     if not target_date:
-        target_date = korean_date_string()  # 한국 시간 기준 날짜
+        target_date = korean_date_string()
     
     if not CRAWLER_AVAILABLE or not cached_notices:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 서비스를 사용할 수 없습니다."}}]}}
     
     try:
-        # 해당 날짜의 노선 통제 정보 찾기
         filtered_notices = crawler.filter_by_date(cached_notices, target_date)
         
         route_image_url = None
@@ -574,16 +574,14 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                 if image_path and os.path.exists(image_path):
                     filename = os.path.basename(image_path)
                     base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                    route_image_url = f"{base_url}/static/route_images/{filename}"
+                    route_image_url = f"{base_url}/topis_attachments/route_images/{filename}"
                     notice_title = notice.get('title', '제목 없음')
-                    
-                    # 우회 경로 정보도 가져오기
                     detour_routes = notice.get('detour_routes', {})
                     detour_path = detour_routes.get(route_number, '')
                     print(f"노선 {route_number} 기존 이미지 발견: {filename}")
                     break
             
-            # 해당 노선이 포함된 공지사항 찾기 (이미지 생성용)
+            # 해당 노선이 포함된 공지사항 찾기
             route_pages = notice.get('route_pages', {})
             if route_number in route_pages:
                 target_notice = notice
@@ -605,7 +603,6 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
             
             return {
                 "version": "2.0",
-                "useCallback":False,
                 "template": {
                     "outputs": [
                         {"simpleText": {"text": info_text}},
@@ -619,40 +616,53 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                 }
             }
         
-        # 3단계: 이미지가 없는 경우 - 콜백 처리
+        # 3단계: 이미지가 없는 경우 - 즉시 생성
         elif target_notice:
-            # 콜백 URL 확인
-            callback_url = body.get('userRequest', {}).get('callbackUrl')
+            print(f"📷 노선 {route_number} 이미지 즉시 생성 시작...")
             
-            if callback_url:
-                # 백그라운드에서 이미지 생성 시작
-                background_tasks.add_task(
-                    generate_and_send_kakao_callback,
-                    route_number, target_date, target_notice, callback_url, notice_title, detour_path
-                )
-                
-                # 카카오톡 콜백 활성화 응답 (useCallback: true)
-                return {
-                    "version": "2.0",
-                    "useCallback": True,
-                    "data": {
-                        "text": f"🔄 노선 {route_number}번 이미지 생성 중...\n\n⏳ PDF에서 우회 경로 이미지를 생성하고 있습니다.\n잠시만 기다려주세요... (약 10-30초 소요)"
-                    }
-                }
-            else:
-                # 콜백이 없으면 간단한 정보만 제공
-                info_text = f"🚌 노선 {route_number}번 통제 정보\n"
+            # 즉시 이미지 생성 (동기적으로)
+            route_image_url = generate_route_image_realtime(route_number, target_notice)
+            
+            if route_image_url:
+                # 성공 - 텍스트 + 이미지 함께 응답
+                info_text = f"✅ 노선 {route_number}번 우회 경로\n"
                 info_text += f"📅 {target_date}\n\n"
                 if notice_title:
                     title_short = notice_title[:50] + '...' if len(notice_title) > 50 else notice_title
                     info_text += f"📄 {title_short}\n"
                 if detour_path:
-                    detour_short = detour_path[:80] + '...' if len(detour_path) > 80 else detour_path
-                    info_text += f"🔄 우회 경로: {detour_short}\n"
+                    detour_short = detour_path[:60] + '...' if len(detour_path) > 60 else detour_path
+                    info_text += f"🔄 {detour_short}\n"
+                info_text += "\n📍 자세한 우회 경로는 아래 이미지를 확인하세요."
                 
-                info_text += "\n💡 상세한 이미지를 보려면 카카오톡 관리자에게 콜백 설정을 요청하세요."
-                
-                return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": info_text}}]}}
+                return {
+                    "version": "2.0",
+                    "template": {
+                        "outputs": [
+                            {"simpleText": {"text": info_text}},
+                            {
+                                "simpleImage": {
+                                    "imageUrl": route_image_url,
+                                    "altText": f"{route_number}번 버스 우회 경로"
+                                }
+                            }
+                        ]
+                    }
+                }
+            else:
+                # 실패 - 오류 메시지
+                return {
+                    "version": "2.0",
+                    "template": {
+                        "outputs": [
+                            {
+                                "simpleText": {
+                                    "text": f"❌ 이미지 생성 실패\n\n🚌 노선 {route_number}번\n📅 {target_date}\n\n⚠️ PDF 파일 처리 중 오류가 발생했습니다.\n잠시 후 다시 시도해주세요."
+                                }
+                            }
+                        ]
+                    }
+                }
         
         else:
             # 해당 노선 정보가 없는 경우
