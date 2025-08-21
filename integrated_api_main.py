@@ -427,7 +427,7 @@ async def generate_and_send_kakao_callback_cloudinary(route_number: str, target_
         print(f"❌ 노선 {route_number} Cloudinary 이미지 생성 오류: {e}")
 
 async def initialize_crawler():
-    """크롤러 초기화"""
+    """크롤러 초기화 + 자동 Cloudinary 업로드"""
     global crawler, cached_notices, last_update
     
     if not CRAWLER_AVAILABLE:
@@ -446,6 +446,13 @@ async def initialize_crawler():
         last_update = get_kst_now()
         
         logger.info(f"크롤러 초기화 완료. {len(cached_notices)}개 공지사항 로드됨")
+        
+        # 🔥 새로 추가: 자동 Cloudinary 업로드
+        if cloudinary_configured:
+            logger.info("🚀 자동 Cloudinary 업로드 시작...")
+            await upload_all_cached_images_to_cloudinary()
+        else:
+            logger.warning("⚠️ Cloudinary가 설정되지 않아 자동 업로드를 건너뜁니다.")
         
     except Exception as e:
         logger.error(f"크롤러 초기화 실패: {e}")
@@ -1128,6 +1135,171 @@ async def get_statistics():
         data=stats,
         timestamp=get_kst_now()
     )
+
+async def upload_all_cached_images_to_cloudinary():
+    """캐시된 모든 공지사항의 노선 이미지를 Cloudinary에 업로드"""
+    if not CRAWLER_AVAILABLE or not cloudinary_configured:
+        logger.warning("크롤러 또는 Cloudinary가 설정되지 않아 자동 업로드를 건너뜁니다.")
+        return
+    
+    if not cached_notices:
+        logger.info("업로드할 공지사항이 없습니다.")
+        return
+    
+    logger.info("🔄 모든 노선 이미지를 Cloudinary에 자동 업로드 시작...")
+    
+    upload_count = 0
+    skip_count = 0
+    error_count = 0
+    
+    for notice in cached_notices:
+        notice_seq = notice.get('seq')
+        notice_title = notice.get('title', '제목없음')
+        
+        # 첨부파일이 있고 route_pages 정보가 있는 공지사항만 처리
+        attachments = notice.get('attachments', [])
+        route_pages = notice.get('route_pages', {})
+        
+        if not attachments or not route_pages:
+            continue
+        
+        logger.info(f"📄 공지사항 {notice_seq}: {notice_title[:50]}...")
+        
+        # 기존 route_images 확인
+        route_images = notice.get('route_images', {})
+        
+        for route_number in route_pages.keys():
+            try:
+                # 1. 이미 Cloudinary URL이 있는지 확인
+                existing_url = route_images.get(route_number)
+                if existing_url and 'cloudinary.com' in str(existing_url):
+                    logger.info(f"   노선 {route_number}: Cloudinary URL 이미 존재, 건너뜀")
+                    skip_count += 1
+                    continue
+                
+                # 2. Cloudinary에서 기존 이미지 확인
+                cloudinary_url = check_existing_cloudinary_image(route_number, notice_seq)
+                if cloudinary_url:
+                    # 캐시 업데이트
+                    if 'route_images' not in notice:
+                        notice['route_images'] = {}
+                    notice['route_images'][route_number] = cloudinary_url
+                    logger.info(f"   노선 {route_number}: Cloudinary에서 기존 이미지 발견")
+                    skip_count += 1
+                    continue
+                
+                # 3. 새로 생성 및 업로드
+                logger.info(f"   노선 {route_number}: 새 이미지 생성 및 업로드 중...")
+                cloudinary_url = generate_route_image_realtime_cloudinary(route_number, notice)
+                
+                if cloudinary_url:
+                    upload_count += 1
+                    logger.info(f"   ✅ 노선 {route_number}: 업로드 완료")
+                else:
+                    error_count += 1
+                    logger.warning(f"   ❌ 노선 {route_number}: 업로드 실패")
+                
+                # API 제한을 위한 짧은 대기
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                error_count += 1
+                logger.error(f"   ❌ 노선 {route_number} 처리 중 오류: {e}")
+        
+        # 공지사항별 처리 간격
+        await asyncio.sleep(1)
+    
+    # 캐시 저장
+    if upload_count > 0:
+        crawler._save_cache()
+    
+    logger.info(f"🎉 Cloudinary 자동 업로드 완료!")
+    logger.info(f"   📊 업로드: {upload_count}개, 건너뜀: {skip_count}개, 오류: {error_count}개")
+
+# 수동 업로드 엔드포인트도 추가
+@app.post("/admin/upload-all-images", tags=["관리"])
+async def manual_upload_all_images():
+    """모든 노선 이미지를 수동으로 Cloudinary에 업로드"""
+    try:
+        if not cloudinary_configured:
+            return ControlResponse(
+                success=False,
+                message="Cloudinary가 설정되지 않았습니다.",
+                timestamp=get_kst_now()
+            )
+        
+        await upload_all_cached_images_to_cloudinary()
+        
+        return ControlResponse(
+            success=True,
+            message="모든 노선 이미지 업로드가 완료되었습니다.",
+            timestamp=get_kst_now()
+        )
+        
+    except Exception as e:
+        logger.error(f"수동 업로드 오류: {e}")
+        return ControlResponse(
+            success=False,
+            message=f"업로드 중 오류가 발생했습니다: {str(e)}",
+            timestamp=get_kst_now()
+        )
+
+# 통계에 업로드 현황 추가
+@app.get("/stats/cloudinary", tags=["통계"])
+async def get_cloudinary_statistics():
+    """Cloudinary 업로드 통계"""
+    if not cloudinary_configured:
+        return ControlResponse(
+            success=False,
+            message="Cloudinary가 설정되지 않았습니다.",
+            timestamp=get_kst_now()
+        )
+    
+    try:
+        total_routes = 0
+        uploaded_routes = 0
+        pending_routes = []
+        
+        for notice in cached_notices:
+            route_pages = notice.get('route_pages', {})
+            route_images = notice.get('route_images', {})
+            
+            for route_number in route_pages.keys():
+                total_routes += 1
+                
+                # Cloudinary URL이 있는지 확인
+                image_url = route_images.get(route_number)
+                if image_url and 'cloudinary.com' in str(image_url):
+                    uploaded_routes += 1
+                else:
+                    pending_routes.append({
+                        'route': route_number,
+                        'notice_seq': notice.get('seq'),
+                        'notice_title': notice.get('title', '')[:50]
+                    })
+        
+        upload_percentage = (uploaded_routes / total_routes * 100) if total_routes > 0 else 0
+        
+        return ControlResponse(
+            success=True,
+            message="Cloudinary 통계 조회 완료",
+            data={
+                "total_routes": total_routes,
+                "uploaded_routes": uploaded_routes,
+                "pending_routes": len(pending_routes),
+                "upload_percentage": round(upload_percentage, 1),
+                "pending_details": pending_routes[:10],  # 처음 10개만
+                "cloudinary_configured": cloudinary_configured
+            },
+            timestamp=get_kst_now()
+        )
+        
+    except Exception as e:
+        return ControlResponse(
+            success=False,
+            message=f"통계 조회 오류: {str(e)}",
+            timestamp=get_kst_now()
+        )
 
 if __name__ == "__main__":
     import uvicorn
