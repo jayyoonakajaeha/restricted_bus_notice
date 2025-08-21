@@ -190,43 +190,79 @@ def generate_route_image_realtime(route_number: str, target_notice: Dict) -> Opt
 
 async def send_kakao_callback_message(callback_url: str, message_data: Dict):
     """카카오톡 콜백 URL로 메시지 전송"""
+    print(f"📡 콜백 전송 시도: {callback_url}")
+    print(f"📋 메시지 데이터: {json.dumps(message_data, ensure_ascii=False, indent=2)}")
+    
     try:
         import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(callback_url, json=message_data, timeout=30) as response:
-                result = await response.json()
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                callback_url, 
+                json=message_data, 
+                headers={'Content-Type': 'application/json'}
+            ) as response:
+                response_text = await response.text()
+                print(f"📨 콜백 응답 상태: {response.status}")
+                print(f"📨 콜백 응답 내용: {response_text}")
+                
                 if response.status == 200:
-                    print(f"카카오톡 콜백 전송 성공: {callback_url}")
-                    print(f"콜백 응답: {result}")
+                    print(f"✅ 카카오톡 콜백 전송 성공")
                 else:
-                    print(f"카카오톡 콜백 전송 실패: {response.status}")
-                    print(f"응답 내용: {result}")
-    except Exception as e:
-        print(f"카카오톡 콜백 전송 오류: {e}")
+                    print(f"❌ 카카오톡 콜백 전송 실패: {response.status}")
+                    
+    except ImportError:
+        print("📡 aiohttp 없음, requests로 fallback")
         # aiohttp가 없으면 requests로 fallback
         try:
-            response = requests.post(callback_url, json=message_data, timeout=30)
+            import requests
+            response = requests.post(
+                callback_url, 
+                json=message_data, 
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
+            print(f"📨 콜백 응답 상태 (fallback): {response.status_code}")
+            print(f"📨 콜백 응답 내용 (fallback): {response.text}")
+            
             if response.status_code == 200:
-                print(f"카카오톡 콜백 전송 성공 (fallback): {callback_url}")
-                try:
-                    print(f"콜백 응답: {response.json()}")
-                except:
-                    print(f"콜백 응답: {response.text}")
+                print(f"✅ 카카오톡 콜백 전송 성공 (fallback)")
             else:
-                print(f"카카오톡 콜백 전송 실패 (fallback): {response.status_code}")
-                print(f"응답 내용: {response.text}")
+                print(f"❌ 카카오톡 콜백 전송 실패 (fallback): {response.status_code}")
+                
         except Exception as e2:
-            print(f"카카오톡 콜백 전송 완전 실패: {e2}")
+            print(f"❌ 콜백 전송 완전 실패: {e2}")
+            
+    except Exception as e:
+        print(f"❌ 카카오톡 콜백 전송 오류: {e}")
+        # requests로 재시도
+        try:
+            import requests
+            response = requests.post(
+                callback_url, 
+                json=message_data, 
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
+            print(f"📨 콜백 응답 상태 (재시도): {response.status_code}")
+            if response.status_code == 200:
+                print(f"✅ 카카오톡 콜백 전송 성공 (재시도)")
+            else:
+                print(f"❌ 카카오톡 콜백 전송 실패 (재시도): {response.status_code}")
+        except Exception as e2:
+            print(f"❌ 콜백 재시도도 실패: {e2}")
 
 async def generate_and_send_kakao_callback(route_number: str, target_date: str, 
                                          target_notice: Dict, callback_url: str, 
                                          notice_title: str, detour_path: str):
     """백그라운드에서 이미지 생성 후 카카오톡 콜백 전송"""
     try:
-        print(f"백그라운드 이미지 생성 시작: 노선 {route_number}")
+        print(f"🚀 콜백 함수 시작: 노선 {route_number}, URL: {callback_url}")
         
         # 이미지 생성
         route_image_url = generate_route_image_realtime(route_number, target_notice)
+        
+        print(f"📷 이미지 생성 결과: {route_image_url}")
         
         if route_image_url:
             # 성공 메시지 + 이미지 구성
@@ -255,6 +291,7 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
                     ]
                 }
             }
+            print(f"📤 성공 콜백 메시지 준비 완료")
         else:
             # 실패 메시지
             callback_message = {
@@ -269,12 +306,15 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
                     ]
                 }
             }
+            print(f"📤 실패 콜백 메시지 준비 완료")
         
         # 카카오톡 콜백 전송
+        print(f"📡 콜백 전송 시작...")
         await send_kakao_callback_message(callback_url, callback_message)
-        print(f"노선 {route_number} 이미지 생성 및 콜백 완료")
+        print(f"✅ 노선 {route_number} 이미지 생성 및 콜백 완료")
         
     except Exception as e:
+        print(f"❌ 콜백 함수 전체 오류: {e}")
         # 오류 메시지 콜백
         error_message = {
             "version": "2.0",
@@ -282,14 +322,16 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"❌ 이미지 생성 오류\n\n🚌 노선 {route_number}번\n시스템 오류로 이미지를 생성할 수 없습니다.\n관리자에게 문의해주세요."
+                            "text": f"❌ 이미지 생성 오류\n\n🚌 노선 {route_number}번\n시스템 오류로 이미지를 생성할 수 없습니다.\n관리자에게 문의해주세요.\n\n오류: {str(e)}"
                         }
                     }
                 ]
             }
         }
-        await send_kakao_callback_message(callback_url, error_message)
-        print(f"노선 {route_number} 이미지 생성 오류: {e}")
+        try:
+            await send_kakao_callback_message(callback_url, error_message)
+        except Exception as e2:
+            print(f"❌ 오류 콜백 전송도 실패: {e2}")
 
 async def initialize_crawler():
     """크롤러 초기화"""
