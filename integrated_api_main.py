@@ -174,7 +174,7 @@ def generate_route_image_realtime(route_number: str, target_notice: Dict) -> Opt
                         # URL 생성
                         filename = os.path.basename(image_path)
                         base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                        image_url = f"{base_url}/topis_attachments/route_images/{filename}"
+                        image_url = f"{base_url}/static/route_images/{filename}"
                         
                         print(f"노선 {route_number} 이미지 생성 완료: {filename}")
                         return image_url
