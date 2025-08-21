@@ -1,5 +1,5 @@
 """
-통합 API 서버 - 버스 API + 카카오톡 챗봇 (실시간 이미지 생성 + 캐시 저장)
+통합 API 서버 - 버스 API + 카카오톡 챗봇 (이미지 전송 기능 추가)
 """
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
@@ -161,55 +161,6 @@ def get_user_location(user_id: str) -> Optional[Dict]:
     """사용자 위치 정보 조회"""
     return user_sessions.get(user_id, {}).get("location")
 
-def generate_route_image_realtime(route_number: str, target_notice: Dict) -> Optional[str]:
-    """실시간으로 노선 이미지 생성 및 URL 반환"""
-    try:
-        if not CRAWLER_AVAILABLE:
-            return None
-        
-        attachments = target_notice.get('attachments', [])
-        if not attachments:
-            print(f"노선 {route_number}: 첨부파일이 없습니다.")
-            return None
-        
-        notice_seq = target_notice['seq']
-        print(f"노선 {route_number} 이미지 생성 시작... (공지: {notice_seq})")
-        
-        # Gemini로 이미지 생성
-        extracted = crawler._extract_with_gemini(
-            target_notice.get('content', ''),
-            attachments,
-            notice_seq,
-            save_attachments=True  # 첨부파일 저장 및 이미지 생성
-        )
-        
-        # 생성된 이미지 확인
-        route_images = extracted.get('route_images', {})
-        if route_number in route_images:
-            image_path = route_images[route_number]
-            if image_path and os.path.exists(image_path):
-                # 캐시 업데이트
-                if 'route_images' not in target_notice:
-                    target_notice['route_images'] = {}
-                target_notice['route_images'][route_number] = image_path
-                
-                # 전체 캐시 저장
-                crawler._save_cache()
-                
-                # URL 생성
-                filename = os.path.basename(image_path)
-                image_url = f"https://restricted-bus-notice.onrender.com/static/route_images/{filename}"
-                
-                print(f"노선 {route_number} 이미지 생성 완료: {filename}")
-                return image_url
-        
-        print(f"노선 {route_number} 이미지 생성 실패")
-        return None
-        
-    except Exception as e:
-        print(f"노선 {route_number} 이미지 생성 중 오류: {e}")
-        return None
-
 async def initialize_crawler():
     """크롤러 초기화"""
     global crawler, cached_notices, last_update
@@ -245,7 +196,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="서울 버스 통제 알림 API + 카카오톡 챗봇",
     description="서울시 버스 운행 변경 및 통제 정보 조회 API + 카카오톡 인터페이스",
-    version="2.1.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -266,11 +217,11 @@ async def root():
     """API 기본 정보"""
     return {
         "service": "서울 버스 통제 알림 API + 카카오톡 챗봇",
-        "version": "2.1.0",
+        "version": "2.0.0",
         "status": "running",
         "last_update": last_update,
         "cached_notices": len(cached_notices) if cached_notices else 0,
-        "features": ["REST API", "카카오톡 챗봇", "위치 기반 서비스", "실시간 이미지 생성"],
+        "features": ["REST API", "카카오톡 챗봇", "위치 기반 서비스", "이미지 전송"],
         "crawler_available": CRAWLER_AVAILABLE
     }
 
@@ -519,12 +470,10 @@ async def route_check_webhook(req: Request):
             
             response_text += "\n"
         
-        # 이미지 확인 및 생성
+        # 이미지 확인
         route_image_url = None
         filtered_notices = crawler.filter_by_date(cached_notices, target_date)
-        target_notice = None
         
-        # 1단계: 기존 이미지 확인
         for notice in filtered_notices:
             route_images = notice.get('route_images', {})
             if route_number in route_images:
@@ -533,15 +482,6 @@ async def route_check_webhook(req: Request):
                     filename = os.path.basename(image_path)
                     route_image_url = f"https://restricted-bus-notice.onrender.com/static/route_images/{filename}"
                     break
-            
-            # 해당 노선이 포함된 공지사항 찾기
-            route_pages = notice.get('route_pages', {})
-            if route_number in route_pages:
-                target_notice = notice
-        
-        # 2단계: 이미지가 없으면 실시간 생성
-        if not route_image_url and target_notice:
-            route_image_url = generate_route_image_realtime(route_number, target_notice)
         
         if route_image_url:
             # 텍스트 + 이미지 함께 전송
@@ -559,7 +499,7 @@ async def route_check_webhook(req: Request):
 
 @app.post("/webhook/route_image", tags=["카카오톡"])
 async def route_image_webhook(req: Request):
-    """노선 우회 경로 이미지 전송 (실시간 생성 포함)"""
+    """노선 우회 경로 이미지 전송"""
     body = await req.json()
     
     if 'userRequest' not in body:
@@ -585,9 +525,7 @@ async def route_image_webhook(req: Request):
         route_image_url = None
         notice_title = None
         detour_path = None
-        target_notice = None
         
-        # 1단계: 기존 이미지 확인
         for notice in filtered_notices:
             route_images = notice.get('route_images', {})
             if route_number in route_images:
@@ -600,23 +538,8 @@ async def route_image_webhook(req: Request):
                     # 우회 경로 정보도 가져오기
                     detour_routes = notice.get('detour_routes', {})
                     detour_path = detour_routes.get(route_number, '')
-                    print(f"노선 {route_number} 기존 이미지 발견: {filename}")
                     break
-            
-            # 해당 노선이 포함된 공지사항 찾기 (이미지 생성용)
-            route_pages = notice.get('route_pages', {})
-            if route_number in route_pages:
-                target_notice = notice
-                notice_title = notice.get('title', '제목 없음')
-                detour_routes = notice.get('detour_routes', {})
-                detour_path = detour_routes.get(route_number, '')
         
-        # 2단계: 이미지가 없으면 실시간 생성
-        if not route_image_url and target_notice:
-            print(f"노선 {route_number} 이미지 실시간 생성 시작...")
-            route_image_url = generate_route_image_realtime(route_number, target_notice)
-        
-        # 3단계: 응답
         if route_image_url:
             # 텍스트 정보 구성
             info_text = f"🚌 노선 {route_number}번 우회 경로\n"
@@ -635,10 +558,7 @@ async def route_image_webhook(req: Request):
                 alt_text=f"{route_number}번 버스 우회 경로"
             )
         else:
-            if target_notice:
-                return KakaoResponse.simple_text(f"🚌 노선 {route_number}번\n📅 {target_date}\n\n⚠️ 우회 경로 이미지를 생성할 수 없습니다.\nPDF 파일 처리 중 오류가 발생했습니다.")
-            else:
-                return KakaoResponse.simple_text(f"🚌 노선 {route_number}번\n📅 {target_date}\n\n❌ 해당 날짜에 통제 정보가 없습니다.\n다른 날짜나 노선번호를 확인해주세요.")
+            return KakaoResponse.simple_text(f"🚌 노선 {route_number}번\n📅 {target_date}\n\n⚠️ 우회 경로 이미지가 없습니다.\n해당 날짜에 통제 정보가 있는지 확인해주세요.")
             
     except Exception as e:
         return KakaoResponse.simple_text(f"이미지 조회 중 오류: {str(e)}")
@@ -710,4 +630,138 @@ async def nearby_check_webhook(req: Request):
         return KakaoResponse.simple_text(response_text)
         
     except Exception as e:
-        return KakaoResponse.simple_text(f
+        return KakaoResponse.simple_text(f"주변 정보 조회 중 오류: {str(e)}")
+
+@app.post("/webhook/help", tags=["카카오톡"])
+async def help_webhook(req: Request):
+    """도움말"""
+    help_text = """🚌 서울 버스 통제 알림봇 사용법
+
+📋 주요 기능:
+• 오늘 버스 정보 - 전체 통제 현황
+• 노선 조회 - 특정 노선 통제 정보
+• 노선 이미지 - 우회 경로 이미지 확인
+• 위치 등록 - 내 위치 저장
+• 내 주변 확인 - 주변 통제 정류소
+
+💬 사용 예시:
+• "406번 확인해줘"
+• "406번 이미지"
+• "강남역 등록"
+• "내 주변 알려줘"
+
+🔄 실시간 업데이트:
+서울시 TOPIS 시스템과 연동하여
+최신 버스 통제 정보를 제공합니다.
+
+🖼️ 새로운 기능:
+이제 노선별 우회 경로 이미지도
+실시간으로 생성하여 제공합니다!
+처음 요청 시 이미지 생성에 
+약간의 시간이 걸릴 수 있습니다.
+"""
+    
+    quick_replies = ["오늘 버스 정보", "위치 등록", "노선 조회"]
+    return KakaoResponse.quick_replies(help_text, quick_replies)
+
+@app.get("/stats", tags=["통계"])
+async def get_statistics():
+    """시스템 통계 정보"""
+    stats = {
+        "total_notices": len(cached_notices),
+        "last_update": last_update,
+        "user_sessions": len(user_sessions),
+        "crawler_available": CRAWLER_AVAILABLE,
+        "kakao_api_configured": bool(KAKAO_REST_API_KEY)
+    }
+    
+    # 생성된 이미지 개수 통계 추가
+    total_images = 0
+    if cached_notices:
+        control_types = {}
+        for notice in cached_notices:
+            control_type = notice.get('control_type', '기타')
+            control_types[control_type] = control_types.get(control_type, 0) + 1
+            
+            # 이미지 개수 계산
+            route_images = notice.get('route_images', {})
+            total_images += len(route_images)
+        
+        stats["notices_by_type"] = control_types
+        stats["total_generated_images"] = total_images
+    
+    return ControlResponse(
+        success=True,
+        message="통계 정보 조회 완료",
+        data=stats,
+        timestamp=datetime.now()
+    )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000))) 정류소: {len(nearby_stations)}개\n"
+        response_text += f"✅ 현재 주변에 통제 중인 정류소가 없습니다."
+        
+        return KakaoResponse.simple_text(response_text)
+        
+    except Exception as e:
+        return KakaoResponse.simple_text(f"주변 정보 조회 중 오류: {str(e)}")
+
+@app.post("/webhook/help", tags=["카카오톡"])
+async def help_webhook(req: Request):
+    """도움말"""
+    help_text = """🚌 서울 버스 통제 알림봇 사용법
+
+📋 주요 기능:
+• 오늘 버스 정보 - 전체 통제 현황
+• 노선 조회 - 특정 노선 통제 정보
+• 노선 이미지 - 우회 경로 이미지 확인
+• 위치 등록 - 내 위치 저장
+• 내 주변 확인 - 주변 통제 정류소
+
+💬 사용 예시:
+• "406번 확인해줘"
+• "406번 이미지"
+• "강남역 등록"
+• "내 주변 알려줘"
+
+🔄 실시간 업데이트:
+서울시 TOPIS 시스템과 연동하여
+최신 버스 통제 정보를 제공합니다.
+
+🖼️ 새로운 기능:
+이제 노선별 우회 경로 이미지도
+바로 확인할 수 있습니다!
+"""
+    
+    quick_replies = ["오늘 버스 정보", "위치 등록", "노선 조회"]
+    return KakaoResponse.quick_replies(help_text, quick_replies)
+
+@app.get("/stats", tags=["통계"])
+async def get_statistics():
+    """시스템 통계 정보"""
+    stats = {
+        "total_notices": len(cached_notices),
+        "last_update": last_update,
+        "user_sessions": len(user_sessions),
+        "crawler_available": CRAWLER_AVAILABLE,
+        "kakao_api_configured": bool(KAKAO_REST_API_KEY)
+    }
+    
+    if cached_notices:
+        control_types = {}
+        for notice in cached_notices:
+            control_type = notice.get('control_type', '기타')
+            control_types[control_type] = control_types.get(control_type, 0) + 1
+        stats["notices_by_type"] = control_types
+    
+    return ControlResponse(
+        success=True,
+        message="통계 정보 조회 완료",
+        data=stats,
+        timestamp=datetime.now()
+    )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
