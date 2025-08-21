@@ -563,6 +563,9 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                             }
                         }
                     ]
+                },
+                "data": {
+                    "text" : "아니 뭐냐고 아니 뭐냐고 아니 뭐냐고"
                 }
             }
         
