@@ -128,47 +128,58 @@ def get_user_location(user_id: str) -> Optional[Dict]:
     return user_sessions.get(user_id, {}).get("location")
 
 def generate_route_image_realtime(route_number: str, target_notice: Dict) -> Optional[str]:
-    """실시간으로 노선 이미지 생성 및 URL 반환"""
+    """실시간으로 노선 이미지 생성 및 URL 반환 (Gemini 호출 없이)"""
     try:
         if not CRAWLER_AVAILABLE:
             return None
         
         attachments = target_notice.get('attachments', [])
+        route_pages = target_notice.get('route_pages', {})
+        
         if not attachments:
             print(f"노선 {route_number}: 첨부파일이 없습니다.")
             return None
         
+        if route_number not in route_pages:
+            print(f"노선 {route_number}: 페이지 정보가 없습니다.")
+            return None
+        
         notice_seq = target_notice['seq']
-        print(f"노선 {route_number} 이미지 생성 시작... (공지: {notice_seq})")
+        page_num = route_pages[route_number]
         
-        # Gemini로 이미지 생성
-        extracted = crawler._extract_with_gemini(
-            target_notice.get('content', ''),
-            attachments,
-            notice_seq,
-            save_attachments=True  # 첨부파일 저장 및 이미지 생성
-        )
+        print(f"노선 {route_number} 이미지 생성 시작... (페이지: {page_num})")
         
-        # 생성된 이미지 확인
-        route_images = extracted.get('route_images', {})
-        if route_number in route_images:
-            image_path = route_images[route_number]
-            if image_path and os.path.exists(image_path):
-                # 캐시 업데이트
-                if 'route_images' not in target_notice:
-                    target_notice['route_images'] = {}
-                target_notice['route_images'][route_number] = image_path
+        # 첨부파일 다운로드
+        for attachment in attachments:
+            file_path = crawler._download_attachment(attachment, save_to_folder=True)
+            if file_path:
+                # HWP/HWPX 파일이면 PDF로 변환
+                converted_path = crawler._convert_hwp_to_pdf(file_path)
                 
-                # 전체 캐시 저장
-                crawler._save_cache()
+                if converted_path.lower().endswith('.pdf'):
+                    # 해당 페이지를 이미지로 변환
+                    image_path = crawler._convert_pdf_page_to_image(
+                        converted_path, page_num - 1, route_number, notice_seq
+                    )
+                    
+                    if image_path and os.path.exists(image_path):
+                        # 캐시 업데이트
+                        if 'route_images' not in target_notice:
+                            target_notice['route_images'] = {}
+                        target_notice['route_images'][route_number] = image_path
+                        
+                        # 전체 캐시 저장
+                        crawler._save_cache()
+                        
+                        # URL 생성
+                        filename = os.path.basename(image_path)
+                        base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
+                        image_url = f"{base_url}/topis_attachments/route_images/{filename}"
+                        
+                        print(f"노선 {route_number} 이미지 생성 완료: {filename}")
+                        return image_url
                 
-                # URL 생성
-                filename = os.path.basename(image_path)
-                base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                image_url = f"{base_url}/topis_attachments/route_images/{filename}"
-                
-                print(f"노선 {route_number} 이미지 생성 완료: {filename}")
-                return image_url
+                break  # 첫 번째 첨부파일만 처리
         
         print(f"노선 {route_number} 이미지 생성 실패")
         return None
