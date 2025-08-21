@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 애플리케이션 코드 복사
 COPY . .
 
-# 필요한 디렉토리 생성
+# 필요한 디렉토리 생성 (수정됨)
 RUN mkdir -p topis_attachments/route_images
 
 # 포트 노출
@@ -25,5 +25,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# 애플리케이션 실행
-CMD ["uvicorn", "api_main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 애플리케이션 실행 (수정됨)
+CMD ["uvicorn", "integrated_api_main:app", "--host", "0.0.0.0", "--port", "8000"]
