@@ -188,78 +188,50 @@ def generate_route_image_realtime(route_number: str, target_notice: Dict) -> Opt
         print(f"노선 {route_number} 이미지 생성 중 오류: {e}")
         return None
 
-async def send_kakao_callback_message(callback_url: str, message_data: Dict):
-    """카카오톡 콜백 URL로 메시지 전송"""
+async def send_kakao_callback_message_fixed(callback_url: str, message_data: Dict):
+    """카카오톡 콜백 URL로 메시지 전송 (수정된 버전)"""
     print(f"📡 콜백 전송 시도: {callback_url}")
-    print(f"📋 메시지 데이터: {json.dumps(message_data, ensure_ascii=False, indent=2)}")
     
     try:
-        import aiohttp
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                callback_url, 
-                json=message_data, 
-                headers={'Content-Type': 'application/json'}
-            ) as response:
-                response_text = await response.text()
-                print(f"📨 콜백 응답 상태: {response.status}")
-                print(f"📨 콜백 응답 내용: {response_text}")
-                
-                if response.status == 200:
-                    print(f"✅ 카카오톡 콜백 전송 성공")
-                else:
-                    print(f"❌ 카카오톡 콜백 전송 실패: {response.status}")
-                    
-    except ImportError:
-        print("📡 aiohttp 없음, requests로 fallback")
-        # aiohttp가 없으면 requests로 fallback
-        try:
-            import requests
-            response = requests.post(
-                callback_url, 
-                json=message_data, 
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
-            print(f"📨 콜백 응답 상태 (fallback): {response.status_code}")
-            print(f"📨 콜백 응답 내용 (fallback): {response.text}")
-            
-            if response.status_code == 200:
-                print(f"✅ 카카오톡 콜백 전송 성공 (fallback)")
-            else:
-                print(f"❌ 카카오톡 콜백 전송 실패 (fallback): {response.status_code}")
-                
-        except Exception as e2:
-            print(f"❌ 콜백 전송 완전 실패: {e2}")
+        # requests 라이브러리 사용 (더 안정적)
+        import requests
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        response = requests.post(
+            callback_url, 
+            json=message_data, 
+            headers=headers,
+            timeout=10  # 타임아웃 단축
+        )
+        
+        print(f"📨 콜백 응답 상태: {response.status_code}")
+        print(f"📨 콜백 응답 내용: {response.text}")
+        
+        if response.status_code == 200:
+            try:
+                result = response.json()
+                print(f"✅ 카카오톡 콜백 전송 성공: {result}")
+            except:
+                print(f"✅ 카카오톡 콜백 전송 성공 (JSON 파싱 실패)")
+        else:
+            print(f"❌ 카카오톡 콜백 전송 실패: {response.status_code}")
             
     except Exception as e:
         print(f"❌ 카카오톡 콜백 전송 오류: {e}")
-        # requests로 재시도
-        try:
-            import requests
-            response = requests.post(
-                callback_url, 
-                json=message_data, 
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
-            print(f"📨 콜백 응답 상태 (재시도): {response.status_code}")
-            if response.status_code == 200:
-                print(f"✅ 카카오톡 콜백 전송 성공 (재시도)")
-            else:
-                print(f"❌ 카카오톡 콜백 전송 실패 (재시도): {response.status_code}")
-        except Exception as e2:
-            print(f"❌ 콜백 재시도도 실패: {e2}")
 
-async def generate_and_send_kakao_callback(route_number: str, target_date: str, 
-                                         target_notice: Dict, callback_url: str, 
-                                         notice_title: str, detour_path: str):
-    """백그라운드에서 이미지 생성 후 카카오톡 콜백 전송"""
+async def generate_and_send_kakao_callback_fixed(route_number: str, target_date: str, 
+                                               target_notice: Dict, callback_url: str, 
+                                               notice_title: str, detour_path: str):
+    """백그라운드에서 이미지 생성 후 카카오톡 콜백 전송 (수정된 버전)"""
     try:
-        print(f"🚀 콜백 함수 시작: 노선 {route_number}, URL: {callback_url}")
+        print(f"🚀 콜백 함수 시작: 노선 {route_number}")
+        print(f"🔗 콜백 URL: {callback_url}")
         
-        # 이미지 생성
+        # 이미지 생성 (수정된 함수 사용)
         route_image_url = generate_route_image_realtime(route_number, target_notice)
         
         print(f"📷 이미지 생성 결과: {route_image_url}")
@@ -279,7 +251,6 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
             
             callback_message = {
                 "version": "2.0",
-                "useCallback": True,
                 "template": {
                     "outputs": [
                         {"simpleText": {"text": info_text}},
@@ -292,7 +263,6 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
                     ]
                 }
             }
-            print(f"📤 성공 콜백 메시지 준비 완료")
         else:
             # 실패 메시지
             callback_message = {
@@ -307,11 +277,9 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
                     ]
                 }
             }
-            print(f"📤 실패 콜백 메시지 준비 완료")
         
-        # 카카오톡 콜백 전송
-        print(f"📡 콜백 전송 시작...")
-        await send_kakao_callback_message(callback_url, callback_message)
+        # 카카오톡 콜백 전송 (수정된 함수)
+        await send_kakao_callback_message_fixed(callback_url, callback_message)
         print(f"✅ 노선 {route_number} 이미지 생성 및 콜백 완료")
         
     except Exception as e:
@@ -323,14 +291,14 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"❌ 이미지 생성 오류\n\n🚌 노선 {route_number}번\n시스템 오류로 이미지를 생성할 수 없습니다.\n관리자에게 문의해주세요.\n\n오류: {str(e)}"
+                            "text": f"❌ 시스템 오류\n\n🚌 노선 {route_number}번\n이미지 생성 중 오류가 발생했습니다.\n\n오류 상세: {str(e)[:100]}"
                         }
                     }
                 ]
             }
         }
         try:
-            await send_kakao_callback_message(callback_url, error_message)
+            await send_kakao_callback_message_fixed(callback_url, error_message)
         except Exception as e2:
             print(f"❌ 오류 콜백 전송도 실패: {e2}")
 
@@ -539,7 +507,7 @@ async def bus_info_webhook(req: Request):
 
 @app.post("/webhook/route_image", tags=["카카오톡"])
 async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
-    """노선 우회 경로 이미지 전송 (즉시 응답 방식)"""
+    """노선 우회 경로 이미지 전송 (올바른 콜백 구현)"""
     body = await req.json()
     
     if 'userRequest' not in body:
@@ -616,48 +584,37 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                 }
             }
         
-        # 3단계: 이미지가 없는 경우 - 즉시 생성
+        # 3단계: 이미지가 없는 경우 - 콜백 처리 (핵심 수정)
         elif target_notice:
-            print(f"📷 노선 {route_number} 이미지 즉시 생성 시작...")
+            # 콜백 URL 확인
+            callback_url = body.get('userRequest', {}).get('callbackUrl')
             
-            # 즉시 이미지 생성 (동기적으로)
-            route_image_url = generate_route_image_realtime(route_number, target_notice)
-            
-            if route_image_url:
-                # 성공 - 텍스트 + 이미지 함께 응답
-                info_text = f"✅ 노선 {route_number}번 우회 경로\n"
-                info_text += f"📅 {target_date}\n\n"
-                if notice_title:
-                    title_short = notice_title[:50] + '...' if len(notice_title) > 50 else notice_title
-                    info_text += f"📄 {title_short}\n"
-                if detour_path:
-                    detour_short = detour_path[:60] + '...' if len(detour_path) > 60 else detour_path
-                    info_text += f"🔄 {detour_short}\n"
-                info_text += "\n📍 자세한 우회 경로는 아래 이미지를 확인하세요."
+            if callback_url:
+                print(f"🔗 콜백 URL 확인: {callback_url}")
                 
+                # **즉시** 백그라운드 태스크 시작 (5초 이내 응답 보장)
+                background_tasks.add_task(
+                    generate_and_send_kakao_callback_fixed,
+                    route_number, target_date, target_notice, callback_url, notice_title, detour_path
+                )
+                
+                # **핵심**: useCallback: true + 대기 메시지
                 return {
                     "version": "2.0",
-                    "template": {
-                        "outputs": [
-                            {"simpleText": {"text": info_text}},
-                            {
-                                "simpleImage": {
-                                    "imageUrl": route_image_url,
-                                    "altText": f"{route_number}번 버스 우회 경로"
-                                }
-                            }
-                        ]
+                    "useCallback": True,  # 이게 핵심!
+                    "data": {
+                        "text": f"🔄 노선 {route_number}번 이미지 생성 중...\n\n⏳ PDF에서 우회 경로 이미지를 생성하고 있습니다.\n잠시만 기다려주세요... (약 10-30초 소요)"
                     }
                 }
             else:
-                # 실패 - 오류 메시지
+                # 콜백 URL이 없으면 간단한 정보만 제공
                 return {
                     "version": "2.0",
                     "template": {
                         "outputs": [
                             {
                                 "simpleText": {
-                                    "text": f"❌ 이미지 생성 실패\n\n🚌 노선 {route_number}번\n📅 {target_date}\n\n⚠️ PDF 파일 처리 중 오류가 발생했습니다.\n잠시 후 다시 시도해주세요."
+                                    "text": f"🚌 노선 {route_number}번 통제 정보\n📅 {target_date}\n\n📄 {notice_title[:50]}{'...' if len(notice_title) > 50 else ''}\n\n🔄 {detour_path[:80]}{'...' if len(detour_path) > 80 else ''}\n\n💡 이미지를 보려면 관리자에게 콜백 설정을 요청하세요."
                                 }
                             }
                         ]
@@ -681,6 +638,7 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
             
     except Exception as e:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"이미지 조회 중 오류: {str(e)}"}}]}}
+
 
 @app.post("/webhook/route_check", tags=["카카오톡"])
 async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
