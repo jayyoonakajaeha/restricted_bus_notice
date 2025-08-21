@@ -552,6 +552,7 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
             
             return {
                 "version": "2.0",
+                "useCallback":True,
                 "template": {
                     "outputs": [
                         {"simpleText": {"text": info_text}},
