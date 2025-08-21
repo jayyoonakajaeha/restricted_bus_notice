@@ -1,5 +1,5 @@
 """
-통합 API 서버 - 버스 API + 카카오톡 챗봇 (콜백 문제 수정)
+통합 API 서버 - 버스 API + 카카오톡 챗봇 (Cloudinary + 한국시간 적용)
 """
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
@@ -15,6 +15,19 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 import requests
+import tempfile
+import pytz
+
+# Cloudinary import
+try:
+    import cloudinary
+    import cloudinary.uploader
+    import cloudinary.api
+    from cloudinary.utils import cloudinary_url
+    CLOUDINARY_AVAILABLE = True
+except ImportError:
+    print("⚠️ Cloudinary 모듈을 찾을 수 없습니다. pip install cloudinary를 실행하세요.")
+    CLOUDINARY_AVAILABLE = False
 
 # .env 파일 로드
 try:
@@ -35,6 +48,41 @@ except ImportError:
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 한국 시간대 설정
+KST = pytz.timezone('Asia/Seoul')
+
+def get_kst_now():
+    """한국 시간으로 현재 시간 반환"""
+    return datetime.now(KST)
+
+def get_kst_today():
+    """한국 시간으로 오늘 날짜 반환 (YYYY-MM-DD 형식)"""
+    return get_kst_now().strftime("%Y-%m-%d")
+
+# Cloudinary 설정
+if CLOUDINARY_AVAILABLE:
+    cloudinary.config(
+        cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+        api_key=os.getenv("CLOUDINARY_API_KEY"),
+        api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+        secure=True
+    )
+    
+    # Cloudinary 설정 확인
+    cloudinary_configured = bool(
+        os.getenv("CLOUDINARY_CLOUD_NAME") and 
+        os.getenv("CLOUDINARY_API_KEY") and 
+        os.getenv("CLOUDINARY_API_SECRET")
+    )
+    
+    if cloudinary_configured:
+        logger.info("✅ Cloudinary 설정 완료")
+    else:
+        logger.warning("⚠️ Cloudinary 환경변수가 설정되지 않았습니다.")
+        cloudinary_configured = False
+else:
+    cloudinary_configured = False
 
 # 전역 변수
 crawler = None
@@ -108,17 +156,78 @@ def save_user_location(user_id: str, location_data: Dict):
     """사용자 위치 정보 저장"""
     user_sessions[user_id] = {
         "location": location_data,
-        "updatedAt": datetime.now()
+        "updatedAt": get_kst_now()
     }
 
 def get_user_location(user_id: str) -> Optional[Dict]:
     """사용자 위치 정보 조회"""
     return user_sessions.get(user_id, {}).get("location")
 
-def generate_route_image_realtime(route_number: str, target_notice: Dict) -> Optional[str]:
-    """실시간으로 노선 이미지 생성 및 URL 반환"""
+# Cloudinary 이미지 처리 함수들
+def upload_image_to_cloudinary(image_path: str, route_number: str, notice_seq: str) -> Optional[str]:
+    """이미지를 Cloudinary에 업로드하고 URL 반환"""
+    if not cloudinary_configured:
+        print("❌ Cloudinary가 설정되지 않았습니다.")
+        return None
+    
     try:
-        if not CRAWLER_AVAILABLE:
+        # 공개 ID 생성 (검색 가능하도록)
+        public_id = f"bus_routes/route_{route_number}_seq_{notice_seq}"
+        
+        # Cloudinary에 업로드
+        result = cloudinary.uploader.upload(
+            image_path,
+            public_id=public_id,
+            folder="seoul_bus_routes",
+            resource_type="image",
+            format="png",
+            overwrite=True  # 같은 파일이 있으면 덮어쓰기
+        )
+        
+        # 최적화된 URL 생성
+        optimized_url, _ = cloudinary_url(
+            result['public_id'],
+            format="auto",      # 자동 포맷 최적화
+            quality="auto",     # 자동 품질 최적화
+            crop="scale",
+            width=800,          # 최대 너비 800px
+            height=600,         # 최대 높이 600px
+            secure=True
+        )
+        
+        print(f"✅ Cloudinary 업로드 성공: {optimized_url}")
+        return optimized_url
+        
+    except Exception as e:
+        print(f"❌ Cloudinary 업로드 실패: {e}")
+        return None
+
+def check_existing_cloudinary_image(route_number: str, notice_seq: str) -> Optional[str]:
+    """Cloudinary에서 기존 이미지 확인"""
+    if not cloudinary_configured:
+        return None
+    
+    try:
+        public_id = f"seoul_bus_routes/bus_routes/route_{route_number}_seq_{notice_seq}"
+        
+        # 이미지 존재 여부 확인
+        result = cloudinary.api.resource(public_id)
+        
+        if result and result.get('secure_url'):
+            print(f"✅ Cloudinary에서 기존 이미지 발견: {route_number}")
+            return result['secure_url']
+            
+    except cloudinary.exceptions.NotFound:
+        print(f"📷 Cloudinary에 노선 {route_number} 이미지 없음")
+    except Exception as e:
+        print(f"❌ Cloudinary 이미지 확인 오류: {e}")
+    
+    return None
+
+def generate_route_image_realtime_cloudinary(route_number: str, target_notice: Dict) -> Optional[str]:
+    """실시간으로 노선 이미지 생성 후 Cloudinary 업로드"""
+    try:
+        if not CRAWLER_AVAILABLE or not cloudinary_configured:
             return None
         
         attachments = target_notice.get('attachments', [])
@@ -129,40 +238,43 @@ def generate_route_image_realtime(route_number: str, target_notice: Dict) -> Opt
         notice_seq = target_notice['seq']
         print(f"노선 {route_number} 이미지 생성 시작... (공지: {notice_seq})")
         
-        # Gemini로 이미지 생성
-        extracted = crawler._extract_with_gemini(
-            target_notice.get('content', ''),
-            attachments,
-            notice_seq,
-            save_attachments=True  # 첨부파일 저장 및 이미지 생성
-        )
-        
-        # 생성된 이미지 확인
-        route_images = extracted.get('route_images', {})
-        if route_number in route_images:
-            image_path = route_images[route_number]
-            if image_path and os.path.exists(image_path):
-                # 캐시 업데이트
-                if 'route_images' not in target_notice:
-                    target_notice['route_images'] = {}
-                target_notice['route_images'][route_number] = image_path
-                
-                # 전체 캐시 저장
-                crawler._save_cache()
-                
-                # URL 생성 (올바른 베이스 URL 사용)
-                filename = os.path.basename(image_path)
-                # Render 환경에서 올바른 URL 구성
-                base_url = os.getenv("RENDER_EXTERNAL_URL")
-                if not base_url:
-                    # 기본값 - 실제 배포된 URL로 수정 필요
-                    base_url = "https://your-app-name.onrender.com"
-                
-                image_url = f"{base_url}/static/route_images/{filename}"
-                
-                print(f"노선 {route_number} 이미지 생성 완료: {filename}")
-                print(f"이미지 URL: {image_url}")
-                return image_url
+        # 임시 디렉토리에 이미지 생성
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Gemini로 이미지 생성 (임시 폴더 사용)
+            original_images_folder = crawler.images_folder
+            crawler.images_folder = temp_dir  # 임시로 변경
+            
+            extracted = crawler._extract_with_gemini(
+                target_notice.get('content', ''),
+                attachments,
+                notice_seq,
+                save_attachments=False  # 첨부파일은 임시로만 처리
+            )
+            
+            # 원래 폴더 복원
+            crawler.images_folder = original_images_folder
+            
+            # 생성된 이미지 확인 및 Cloudinary 업로드
+            route_images = extracted.get('route_images', {})
+            if route_number in route_images:
+                temp_image_path = route_images[route_number]
+                if temp_image_path and os.path.exists(temp_image_path):
+                    # Cloudinary에 업로드
+                    cloudinary_url = upload_image_to_cloudinary(
+                        temp_image_path, route_number, notice_seq
+                    )
+                    
+                    if cloudinary_url:
+                        # 캐시 업데이트 (URL만 저장)
+                        if 'route_images' not in target_notice:
+                            target_notice['route_images'] = {}
+                        target_notice['route_images'][route_number] = cloudinary_url
+                        
+                        # 전체 캐시 저장
+                        crawler._save_cache()
+                        
+                        print(f"노선 {route_number} 이미지 업로드 완료: {cloudinary_url}")
+                        return cloudinary_url
         
         print(f"노선 {route_number} 이미지 생성 실패")
         return None
@@ -237,18 +349,18 @@ async def send_kakao_callback_message(callback_url: str, message_data: Dict):
             print(f"❌ 카카오톡 콜백 전송 완전 실패: {e2}")
             return False
 
-async def generate_and_send_kakao_callback(route_number: str, target_date: str, 
-                                         target_notice: Dict, callback_url: str, 
-                                         notice_title: str, detour_path: str):
-    """백그라운드에서 이미지 생성 후 카카오톡 콜백 전송"""
+async def generate_and_send_kakao_callback_cloudinary(route_number: str, target_date: str, 
+                                                    target_notice: Dict, callback_url: str, 
+                                                    notice_title: str, detour_path: str):
+    """백그라운드에서 Cloudinary 이미지 생성 후 카카오톡 콜백 전송"""
     try:
-        print(f"🔄 백그라운드 이미지 생성 시작: 노선 {route_number}")
+        print(f"🔄 백그라운드 Cloudinary 이미지 생성 시작: 노선 {route_number}")
         
-        # 이미지 생성
-        route_image_url = generate_route_image_realtime(route_number, target_notice)
+        # Cloudinary에 이미지 생성 및 업로드
+        route_image_url = generate_route_image_realtime_cloudinary(route_number, target_notice)
         
         if route_image_url:
-            # 성공 메시지 + 이미지 구성
+            # 성공 메시지 + Cloudinary 이미지 구성
             info_text = f"✅ 이미지 생성 완료!\n\n"
             info_text += f"🚌 노선 {route_number}번 우회 경로\n"
             info_text += f"📅 {target_date}\n\n"
@@ -260,7 +372,6 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
                 info_text += f"🔄 {detour_short}\n"
             info_text += "\n📍 자세한 우회 경로는 아래 이미지를 확인하세요."
             
-            # 올바른 카카오톡 응답 형식
             callback_message = {
                 "version": "2.0",
                 "template": {
@@ -294,7 +405,7 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
         success = await send_kakao_callback_message(callback_url, callback_message)
         
         if success:
-            print(f"✅ 노선 {route_number} 이미지 생성 및 콜백 완료")
+            print(f"✅ 노선 {route_number} Cloudinary 이미지 생성 및 콜백 완료")
         else:
             print(f"❌ 노선 {route_number} 콜백 전송 실패")
         
@@ -313,7 +424,7 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
             }
         }
         await send_kakao_callback_message(callback_url, error_message)
-        print(f"❌ 노선 {route_number} 이미지 생성 오류: {e}")
+        print(f"❌ 노선 {route_number} Cloudinary 이미지 생성 오류: {e}")
 
 async def initialize_crawler():
     """크롤러 초기화"""
@@ -322,7 +433,7 @@ async def initialize_crawler():
     if not CRAWLER_AVAILABLE:
         logger.warning("크롤러 모듈을 사용할 수 없습니다.")
         cached_notices = []
-        last_update = datetime.now()
+        last_update = get_kst_now()
         return
     
     try:
@@ -332,14 +443,14 @@ async def initialize_crawler():
         
         crawler = TOPISCrawler(gemini_api_key=gemini_api_key)
         cached_notices, cache_hit = crawler.crawl_notices()
-        last_update = datetime.now()
+        last_update = get_kst_now()
         
         logger.info(f"크롤러 초기화 완료. {len(cached_notices)}개 공지사항 로드됨")
         
     except Exception as e:
         logger.error(f"크롤러 초기화 실패: {e}")
         cached_notices = []
-        last_update = datetime.now()
+        last_update = get_kst_now()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -351,28 +462,16 @@ async def lifespan(app: FastAPI):
 # FastAPI 앱 생성
 app = FastAPI(
     title="서울 버스 통제 알림 API + 카카오톡 챗봇",
-    description="서울시 버스 운행 변경 및 통제 정보 조회 API + 카카오톡 인터페이스",
-    version="2.1.0",
+    description="서울시 버스 운행 변경 및 통제 정보 조회 API + 카카오톡 인터페이스 (Cloudinary 연동)",
+    version="2.2.0",
     lifespan=lifespan
 )
 
-# 디렉토리 생성 후 정적 파일 서빙 설정
+# 디렉토리 생성 후 정적 파일 서빙 설정 (여전히 필요 - 다른 파일들용)
 attachments_dir = ensure_directories()
 try:
-    # 정적 파일 마운트 - 올바른 경로로 설정
     app.mount("/static", StaticFiles(directory=attachments_dir), name="static")
     logger.info(f"✅ 정적 파일 서빙 설정 완료: {attachments_dir}")
-    
-    # 이미지 폴더 확인
-    images_dir = os.path.join(attachments_dir, "route_images")
-    if os.path.exists(images_dir):
-        logger.info(f"✅ 이미지 폴더 확인: {images_dir}")
-        # 기존 이미지 파일 개수 확인
-        image_files = [f for f in os.listdir(images_dir) if f.endswith('.png')]
-        logger.info(f"📸 기존 이미지 파일: {len(image_files)}개")
-    else:
-        logger.warning(f"⚠️ 이미지 폴더가 없습니다: {images_dir}")
-        
 except Exception as e:
     logger.error(f"❌ 정적 파일 서빙 설정 실패: {e}")
 
@@ -388,52 +487,35 @@ app.add_middleware(
 @app.get("/", tags=["기본"])
 async def root():
     """API 기본 정보"""
-    # 현재 배포된 URL 확인
-    render_url = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000")
-    
     return {
         "service": "서울 버스 통제 알림 API + 카카오톡 챗봇",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "status": "running",
         "last_update": last_update,
         "cached_notices": len(cached_notices) if cached_notices else 0,
-        "features": ["REST API", "카카오톡 챗봇", "위치 기반 서비스", "실시간 이미지 생성"],
+        "features": ["REST API", "카카오톡 챗봇", "위치 기반 서비스", "실시간 이미지 생성", "Cloudinary 연동"],
         "crawler_available": CRAWLER_AVAILABLE,
-        "base_url": render_url,
-        "static_url_example": f"{render_url}/static/route_images/"
+        "cloudinary_available": cloudinary_configured,
+        "current_kst_time": get_kst_now().isoformat(),
+        "current_kst_date": get_kst_today()
     }
 
 @app.get("/health", tags=["기본"])
 async def health_check():
     """헬스 체크"""
-    # 정적 파일 디렉토리 상태 확인
-    static_status = "unknown"
-    image_count = 0
-    
-    try:
-        images_dir = os.path.join(attachments_dir, "route_images")
-        if os.path.exists(images_dir):
-            image_files = [f for f in os.listdir(images_dir) if f.endswith('.png')]
-            image_count = len(image_files)
-            static_status = "accessible"
-        else:
-            static_status = "directory_not_found"
-    except Exception as e:
-        static_status = f"error: {str(e)}"
-    
     return {
         "status": "healthy",
-        "timestamp": datetime.now(),
+        "timestamp": get_kst_now(),
         "kakao_api": "configured" if KAKAO_REST_API_KEY else "missing",
         "cached_notices": len(cached_notices) if cached_notices else 0,
         "crawler_status": "available" if CRAWLER_AVAILABLE else "unavailable",
-        "static_files": static_status,
-        "image_count": image_count,
-        "attachments_dir": attachments_dir
+        "cloudinary_status": "configured" if cloudinary_configured else "missing",
+        "current_kst_time": get_kst_now().isoformat(),
+        "current_kst_date": get_kst_today()
     }
 
 @app.get("/notices", tags=["공지사항"])
-async def get_notices(date: Optional[str] = Query(None, description="조회할 날짜 (YYYY-MM-DD)")):
+async def get_notices(date: Optional[str] = Query(None, description="조회할 날짜 (YYYY-MM-DD, 기본값: 오늘)")):
     """공지사항 목록 조회"""
     if not CRAWLER_AVAILABLE:
         raise HTTPException(status_code=503, detail="크롤러 모듈을 사용할 수 없습니다.")
@@ -441,27 +523,32 @@ async def get_notices(date: Optional[str] = Query(None, description="조회할 �
     if not cached_notices:
         raise HTTPException(status_code=503, detail="데이터를 로드 중입니다.")
     
-    if date:
+    # 날짜가 없으면 한국 시간 기준 오늘 날짜 사용
+    if not date:
+        date = get_kst_today()
+    else:
         try:
             datetime.strptime(date, '%Y-%m-%d')
         except ValueError:
-            raise HTTPException(status_code=400, detail="잘못된 날짜 형식입니다.")
-        
-        filtered_notices = crawler.filter_by_date(cached_notices, date)
-        return filtered_notices
+            raise HTTPException(status_code=400, detail="잘못된 날짜 형식입니다. YYYY-MM-DD 형식을 사용해주세요.")
     
-    return cached_notices
+    filtered_notices = crawler.filter_by_date(cached_notices, date)
+    return filtered_notices
 
 @app.get("/routes/{route_number}/controls", tags=["노선"])
-async def get_route_controls(route_number: str, date: str = Query(..., description="조회할 날짜")):
+async def get_route_controls(route_number: str, date: str = Query(None, description="조회할 날짜 (기본값: 오늘)")):
     """특정 노선의 통제 정보 조회"""
     if not CRAWLER_AVAILABLE:
         raise HTTPException(status_code=503, detail="크롤러 모듈을 사용할 수 없습니다.")
     
-    try:
-        datetime.strptime(date, '%Y-%m-%d')
-    except ValueError:
-        raise HTTPException(status_code=400, detail="잘못된 날짜 형식입니다.")
+    # 날짜가 없으면 한국 시간 기준 오늘 날짜 사용
+    if not date:
+        date = get_kst_today()
+    else:
+        try:
+            datetime.strptime(date, '%Y-%m-%d')
+        except ValueError:
+            raise HTTPException(status_code=400, detail="잘못된 날짜 형식입니다.")
     
     controls = crawler.get_control_info_by_route(cached_notices, date, route_number)
     
@@ -477,7 +564,7 @@ async def get_position_controls(request: PositionRequest):
         return ControlResponse(
             success=False,
             message="크롤러 모듈을 사용할 수 없습니다.",
-            timestamp=datetime.now()
+            timestamp=get_kst_now()
         )
     
     try:
@@ -488,14 +575,14 @@ async def get_position_controls(request: PositionRequest):
             success=True,
             message=f"반경 {request.radius}m 내 정류소 {len(nearby_stations)}개 발견",
             data={"nearby_stations": nearby_stations},
-            timestamp=datetime.now()
+            timestamp=get_kst_now()
         )
         
     except Exception as e:
         return ControlResponse(
             success=False,
             message=f"위치 기반 조회 오류: {str(e)}",
-            timestamp=datetime.now()
+            timestamp=get_kst_now()
         )
 
 # 카카오톡 웹훅 엔드포인트들
@@ -507,7 +594,7 @@ async def bus_info_webhook(req: Request):
     if 'userRequest' not in body:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "잘못된 요청입니다."}}]}}
     
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_kst_today()  # 한국 시간 기준 오늘 날짜
     
     if not CRAWLER_AVAILABLE or not cached_notices:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 버스 정보 서비스를 사용할 수 없습니다. 잠시 후 다시 시도해주세요."}}]}}
@@ -554,7 +641,7 @@ async def bus_info_webhook(req: Request):
 
 @app.post("/webhook/route_image", tags=["카카오톡"])
 async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
-    """노선 우회 경로 이미지 전송 (수정된 카카오톡 콜백)"""
+    """노선 우회 경로 이미지 전송 (Cloudinary 버전)"""
     body = await req.json()
     
     if 'userRequest' not in body:
@@ -567,8 +654,9 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
     if not route_number:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 9401"}}]}}
     
+    # 날짜가 없으면 한국 시간 기준 오늘 날짜 사용
     if not target_date:
-        target_date = datetime.now().strftime("%Y-%m-%d")
+        target_date = get_kst_today()
     
     if not CRAWLER_AVAILABLE or not cached_notices:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 서비스를 사용할 수 없습니다."}}]}}
@@ -582,30 +670,18 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
         detour_path = None
         target_notice = None
         
-        # 1단계: 기존 이미지 확인
+        # 1단계: 캐시된 Cloudinary URL 확인
         for notice in filtered_notices:
             route_images = notice.get('route_images', {})
             if route_number in route_images:
-                image_path = route_images[route_number]
-                if image_path and os.path.exists(image_path):
-                    filename = os.path.basename(image_path)
-                    
-                    # 올바른 베이스 URL 사용
-                    base_url = os.getenv("RENDER_EXTERNAL_URL")
-                    if not base_url:
-                        # 요청 헤더에서 호스트 정보 가져오기
-                        host = req.headers.get("host", "localhost:8000")
-                        protocol = "https" if "onrender.com" in host else "http"
-                        base_url = f"{protocol}://{host}"
-                    
-                    route_image_url = f"{base_url}/static/route_images/{filename}"
+                cached_url = route_images[route_number]
+                # URL이 Cloudinary URL인지 확인
+                if cached_url and ('cloudinary.com' in cached_url or cached_url.startswith('http')):
+                    route_image_url = cached_url
                     notice_title = notice.get('title', '제목 없음')
-                    
-                    # 우회 경로 정보도 가져오기
                     detour_routes = notice.get('detour_routes', {})
                     detour_path = detour_routes.get(route_number, '')
-                    print(f"✅ 노선 {route_number} 기존 이미지 발견: {filename}")
-                    print(f"🔗 이미지 URL: {route_image_url}")
+                    print(f"✅ 노선 {route_number} 캐시된 Cloudinary URL 발견")
                     break
             
             # 해당 노선이 포함된 공지사항 찾기 (이미지 생성용)
@@ -615,6 +691,16 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                 notice_title = notice.get('title', '제목 없음')
                 detour_routes = notice.get('detour_routes', {})
                 detour_path = detour_routes.get(route_number, '')
+                
+                # Cloudinary에서 직접 확인
+                if not route_image_url:
+                    route_image_url = check_existing_cloudinary_image(route_number, notice['seq'])
+                    if route_image_url:
+                        # 캐시에도 저장
+                        if 'route_images' not in notice:
+                            notice['route_images'] = {}
+                        notice['route_images'][route_number] = route_image_url
+                        crawler._save_cache()
         
         # 2단계: 기존 이미지가 있으면 즉시 응답
         if route_image_url:
@@ -643,26 +729,26 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                 }
             }
         
-        # 3단계: 이미지가 없는 경우 - 콜백 처리
+        # 3단계: 이미지가 없는 경우 - Cloudinary 업로드로 콜백 처리
         elif target_notice:
-            # 콜백 URL 확인
             callback_url = body.get('userRequest', {}).get('callbackUrl')
             
             if callback_url:
                 print(f"🔄 콜백 URL 발견: {callback_url}")
                 
-                # 백그라운드에서 이미지 생성 시작
+                # 백그라운드에서 Cloudinary 업로드 시작
                 background_tasks.add_task(
-                    generate_and_send_kakao_callback,
+                    generate_and_send_kakao_callback_cloudinary,
                     route_number, target_date, target_notice, callback_url, notice_title, detour_path
                 )
                 
                 # 카카오톡 콜백 활성화 응답 (중요: useCallback: true)
+                storage_type = "Cloudinary" if cloudinary_configured else "임시 저장소"
                 return {
                     "version": "2.0",
                     "useCallback": True,
                     "data": {
-                        "text": f"🔄 노선 {route_number}번 이미지 생성 중...\n\n⏳ PDF에서 우회 경로 이미지를 생성하고 있습니다.\n잠시만 기다려주세요... (약 10-30초 소요)"
+                        "text": f"🔄 노선 {route_number}번 이미지 생성 중...\n\n⏳ PDF에서 우회 경로 이미지를 생성하여 {storage_type}에 업로드하고 있습니다.\n잠시만 기다려주세요... (약 15-45초 소요)"
                     }
                 }
             else:
@@ -702,7 +788,7 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
 
 @app.post("/webhook/route_check", tags=["카카오톡"])
 async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
-    """특정 노선 통제 정보 조회 (수정된 카카오톡 콜백)"""
+    """특정 노선 통제 정보 조회 (Cloudinary 버전)"""
     body = await req.json()
     
     if 'userRequest' not in body:
@@ -715,8 +801,9 @@ async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
     if not route_number:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 7016"}}]}}
     
+    # 날짜가 없으면 한국 시간 기준 오늘 날짜 사용
     if not target_date:
-        target_date = datetime.now().strftime("%Y-%m-%d")
+        target_date = get_kst_today()
     
     if not CRAWLER_AVAILABLE or not cached_notices:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 버스 정보 서비스를 사용할 수 없습니다."}}]}}
@@ -752,29 +839,20 @@ async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
             
             response_text += "\n"
         
-        # 이미지 확인 및 생성
+        # 이미지 확인 및 생성 (Cloudinary 버전)
         route_image_url = None
         filtered_notices = crawler.filter_by_date(cached_notices, target_date)
         target_notice = None
         notice_title = None
         detour_path = None
         
-        # 1단계: 기존 이미지 확인
+        # 1단계: 캐시된 Cloudinary URL 확인
         for notice in filtered_notices:
             route_images = notice.get('route_images', {})
             if route_number in route_images:
-                image_path = route_images[route_number]
-                if image_path and os.path.exists(image_path):
-                    filename = os.path.basename(image_path)
-                    
-                    # 올바른 베이스 URL 사용
-                    base_url = os.getenv("RENDER_EXTERNAL_URL")
-                    if not base_url:
-                        host = req.headers.get("host", "localhost:8000")
-                        protocol = "https" if "onrender.com" in host else "http"
-                        base_url = f"{protocol}://{host}"
-                    
-                    route_image_url = f"{base_url}/static/route_images/{filename}"
+                cached_url = route_images[route_number]
+                if cached_url and ('cloudinary.com' in cached_url or cached_url.startswith('http')):
+                    route_image_url = cached_url
                     break
             
             # 해당 노선이 포함된 공지사항 찾기
@@ -784,6 +862,16 @@ async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
                 notice_title = notice.get('title', '제목 없음')
                 detour_routes = notice.get('detour_routes', {})
                 detour_path = detour_routes.get(route_number, '')
+                
+                # Cloudinary에서 직접 확인
+                if not route_image_url:
+                    route_image_url = check_existing_cloudinary_image(route_number, notice['seq'])
+                    if route_image_url:
+                        # 캐시에도 저장
+                        if 'route_images' not in notice:
+                            notice['route_images'] = {}
+                        notice['route_images'][route_number] = route_image_url
+                        crawler._save_cache()
         
         # 2단계: 기존 이미지가 있으면 텍스트 + 이미지 함께 전송
         if route_image_url:
@@ -802,7 +890,7 @@ async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
                 }
             }
         
-        # 3단계: 이미지가 없으면 처리
+        # 3단계: 이미지가 없으면 처리 (Cloudinary 버전)
         elif target_notice:
             # 콜백 URL 확인
             callback_url = body.get('userRequest', {}).get('callbackUrl')
@@ -810,9 +898,9 @@ async def route_check_webhook(req: Request, background_tasks: BackgroundTasks):
             if callback_url:
                 print(f"🔄 노선 체크 - 콜백 URL 발견: {callback_url}")
                 
-                # 백그라운드에서 이미지 생성 후 콜백 전송
+                # 백그라운드에서 Cloudinary 업로드 후 콜백 전송
                 background_tasks.add_task(
-                    generate_and_send_kakao_callback,
+                    generate_and_send_kakao_callback_cloudinary,
                     route_number, target_date, target_notice, callback_url, notice_title, detour_path
                 )
                 
@@ -893,7 +981,7 @@ async def nearby_check_webhook(req: Request):
     
     try:
         tm_x, tm_y = wgs84_to_tm(location["x"], location["y"])
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = get_kst_today()  # 한국 시간 기준 오늘 날짜
         
         request_data = PositionRequest(tm_x=tm_x, tm_y=tm_y, radius=500, target_date=today)
         result = await get_position_controls(request_data)
@@ -904,7 +992,8 @@ async def nearby_check_webhook(req: Request):
         data = result.data
         nearby_stations = data.get('nearby_stations', [])
         
-        response_text = f"📍 {location['name']} 주변 500m\n\n"
+        response_text = f"📍 {location['name']} 주변 500m\n"
+        response_text += f"📅 오늘 ({today})\n\n"
         response_text += f"🚏 주변 정류소: {len(nearby_stations)}개\n"
         response_text += f"✅ 현재 주변에 통제 중인 정류소가 없습니다."
         
@@ -916,7 +1005,12 @@ async def nearby_check_webhook(req: Request):
 @app.post("/webhook/help", tags=["카카오톡"])
 async def help_webhook(req: Request):
     """도움말"""
-    help_text = """🚌 서울 버스 통제 알림봇 사용법
+    current_time = get_kst_now().strftime("%H:%M")
+    current_date = get_kst_today()
+    
+    help_text = f"""🚌 서울 버스 통제 알림봇 사용법
+
+📅 현재 시간: {current_date} {current_time} (KST)
 
 📋 주요 기능:
 • 오늘 버스 정보 - 전체 통제 현황
@@ -937,9 +1031,11 @@ async def help_webhook(req: Request):
 
 🖼️ 새로운 기능:
 이제 노선별 우회 경로 이미지도
-실시간으로 생성하여 제공합니다!
+클라우드에 저장하여 안정적으로 제공합니다!
 처음 요청 시 이미지 생성에 
 약간의 시간이 걸릴 수 있습니다.
+
+⏰ 모든 시간은 한국 표준시(KST) 기준입니다.
 """
     
     quick_replies = [{"label": reply, "action": "message", "messageText": reply} for reply in ["오늘 버스 정보", "위치 등록", "노선 조회"]]
@@ -951,71 +1047,49 @@ async def help_webhook(req: Request):
         }
     }
 
-# 정적 파일 테스트 엔드포인트 추가
-@app.get("/test/static", tags=["테스트"])
-async def test_static_files(req: Request):
-    """정적 파일 서빙 테스트"""
+# 테스트 엔드포인트들
+@app.get("/test/cloudinary", tags=["테스트"])
+async def test_cloudinary():
+    """Cloudinary 연결 테스트"""
+    if not cloudinary_configured:
+        return {
+            "status": "not_configured",
+            "message": "Cloudinary 환경변수가 설정되지 않았습니다.",
+            "required_env_vars": ["CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"]
+        }
+    
     try:
-        images_dir = os.path.join(attachments_dir, "route_images")
-        
-        if not os.path.exists(images_dir):
-            return {"error": "이미지 디렉토리가 없습니다", "path": images_dir}
-        
-        image_files = [f for f in os.listdir(images_dir) if f.endswith('.png')]
-        
-        # 베이스 URL 확인 (요청 헤더 기반)
-        base_url = os.getenv("RENDER_EXTERNAL_URL")
-        if not base_url:
-            host = req.headers.get("host", "localhost:8000")
-            protocol = "https" if "onrender.com" in host else "http"
-            base_url = f"{protocol}://{host}"
-        
-        file_info = []
-        for filename in image_files[:5]:  # 최대 5개만
-            file_path = os.path.join(images_dir, filename)
-            file_size = os.path.getsize(file_path)
-            file_url = f"{base_url}/static/route_images/{filename}"
-            
-            file_info.append({
-                "filename": filename,
-                "size": file_size,
-                "url": file_url,
-                "accessible": os.access(file_path, os.R_OK)
-            })
+        # Cloudinary API 테스트
+        result = cloudinary.api.ping()
         
         return {
-            "images_directory": images_dir,
-            "total_images": len(image_files),
-            "base_url": base_url,
-            "sample_files": file_info,
-            "static_mount_path": "/static",
-            "full_static_path": f"{base_url}/static/route_images/",
-            "host_header": req.headers.get("host"),
-            "render_external_url": os.getenv("RENDER_EXTERNAL_URL")
+            "status": "success",
+            "message": "Cloudinary 연결 성공",
+            "cloud_name": os.getenv("CLOUDINARY_CLOUD_NAME"),
+            "api_response": result,
+            "timestamp": get_kst_now()
         }
         
     except Exception as e:
-        return {"error": str(e)}
+        return {
+            "status": "error",
+            "message": f"Cloudinary 연결 실패: {str(e)}",
+            "timestamp": get_kst_now()
+        }
 
-# 이미지 직접 접근 테스트
-@app.get("/test/image/{filename}", tags=["테스트"])
-async def test_image_access(filename: str):
-    """특정 이미지 파일 직접 접근 테스트"""
-    try:
-        images_dir = os.path.join(attachments_dir, "route_images")
-        image_path = os.path.join(images_dir, filename)
-        
-        if not os.path.exists(image_path):
-            raise HTTPException(status_code=404, detail=f"이미지 파일을 찾을 수 없습니다: {filename}")
-        
-        return FileResponse(
-            path=image_path,
-            filename=filename,
-            media_type='image/png'
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/test/time", tags=["테스트"])
+async def test_time():
+    """시간 설정 테스트"""
+    utc_now = datetime.utcnow()
+    kst_now = get_kst_now()
+    
+    return {
+        "utc_time": utc_now.isoformat(),
+        "kst_time": kst_now.isoformat(),
+        "kst_date": get_kst_today(),
+        "timezone": "Asia/Seoul",
+        "offset_hours": 9
+    }
 
 @app.get("/stats", tags=["통계"])
 async def get_statistics():
@@ -1025,45 +1099,34 @@ async def get_statistics():
         "last_update": last_update,
         "user_sessions": len(user_sessions),
         "crawler_available": CRAWLER_AVAILABLE,
-        "kakao_api_configured": bool(KAKAO_REST_API_KEY)
+        "cloudinary_available": cloudinary_configured,
+        "kakao_api_configured": bool(KAKAO_REST_API_KEY),
+        "current_kst_time": get_kst_now().isoformat(),
+        "current_kst_date": get_kst_today()
     }
     
     # 생성된 이미지 개수 통계 추가
-    total_images = 0
+    total_cloudinary_images = 0
     if cached_notices:
         control_types = {}
         for notice in cached_notices:
             control_type = notice.get('control_type', '기타')
             control_types[control_type] = control_types.get(control_type, 0) + 1
             
-            # 이미지 개수 계산
+            # Cloudinary 이미지 개수 계산
             route_images = notice.get('route_images', {})
-            total_images += len(route_images)
+            for image_url in route_images.values():
+                if image_url and 'cloudinary.com' in str(image_url):
+                    total_cloudinary_images += 1
         
         stats["notices_by_type"] = control_types
-        stats["total_generated_images"] = total_images
-    
-    # 실제 이미지 파일 개수도 확인
-    try:
-        images_dir = os.path.join(attachments_dir, "route_images")
-        if os.path.exists(images_dir):
-            actual_image_files = [f for f in os.listdir(images_dir) if f.endswith('.png')]
-            stats["actual_image_files"] = len(actual_image_files)
-            
-            # 샘플 이미지 파일명들
-            stats["sample_image_files"] = actual_image_files[:3]
-        else:
-            stats["actual_image_files"] = 0
-            stats["sample_image_files"] = []
-    except:
-        stats["actual_image_files"] = 0
-        stats["sample_image_files"] = []
+        stats["total_cloudinary_images"] = total_cloudinary_images
     
     return ControlResponse(
         success=True,
         message="통계 정보 조회 완료",
         data=stats,
-        timestamp=datetime.now()
+        timestamp=get_kst_now()
     )
 
 if __name__ == "__main__":
