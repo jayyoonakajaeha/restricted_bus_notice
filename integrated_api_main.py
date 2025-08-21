@@ -213,6 +213,15 @@ async def generate_and_send_kakao_callback(route_number: str, target_date: str,
     """백그라운드에서 이미지 생성 후 카카오톡 콜백 전송"""
     try:
         print(f"백그라운드 이미지 생성 시작: 노선 {route_number}")
+        callback_message = {
+                "version": "2.0",
+                "template": {
+                    "outputs": [
+                        {"simpleText": {"text": "좀 기다려"}},
+                    ]
+                }
+            }
+        await send_kakao_callback_message(callback_url, callback_message)
         
         # 이미지 생성
         route_image_url = generate_route_image_realtime(route_number, target_notice)
