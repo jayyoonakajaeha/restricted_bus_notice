@@ -44,7 +44,7 @@ class TOPISCrawler:
         self.service_key = '9bGy9ZjwCHHVmm2vedRonmGrxsfjeo4HMPvyN+R43n5GtRnF10GcHruamRZ7pjfxZjXEQF2Jd+MWxt0ztc5oZg=='
         self.cache_file = cache_file
         self.cache_data = self._load_cache()
-        self.download_folder = r"C:\Users\613ja\Documents\KT디지털인재장학생\집회알리미\topis_attachments"
+        self.download_folder = "./topis_attachments"
         self.images_folder = os.path.join(self.download_folder, "route_images")
         
         # 폴더 생성
