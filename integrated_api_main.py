@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 import requests
 # integrated_api_main.py 상단에 추가
 import asyncio
+import re
 
 # .env 파일 로드
 try:
