@@ -561,7 +561,7 @@ def generate_route_image_realtime_startup(route_number: str, target_notice: Dict
                     # URL 생성
                     filename = os.path.basename(image_path)
                     base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                    image_url = f"{base_url}/topis_attachments/route_images/{filename}"
+                    image_url = f"{base_url}/static/route_images/{filename}"
                     
                     return image_url
         
@@ -789,7 +789,7 @@ async def route_image_webhook(req: Request):
                     if image_path and os.path.exists(image_path):
                         filename = os.path.basename(image_path)
                         base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                        route_image_url = f"{base_url}/topis_attachments/route_images/{filename}"
+                        route_image_url = f"{base_url}/static/route_images/{filename}"
                 
                 # 응답 구성
                 info_text = f"🚌 노선 {route_number}번 우회 경로\n"
