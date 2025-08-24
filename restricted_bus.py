@@ -280,6 +280,60 @@ class TOPISCrawler:
             print(f"PDF 페이지 이미지 변환 실패: {e}")
             return None
 
+    def _get_station_coordinates(self, station_id, station_name=None):
+        """정류소 좌표 조회 (ARS ID 또는 정류소명 사용)"""
+        coordinates = None
+        
+        try:
+            # 1단계: ARS ID로 좌표 조회 (gpsX, gpsY 사용)
+            if station_id and station_id.isdigit() and len(station_id) == 5:
+                url = 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid'
+                params = {'serviceKey': self.service_key, 'arsId': station_id}
+                
+                response = requests.get(url, params=params, timeout=5)
+                if response.status_code == 200:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(response.content.decode('utf-8'))
+                    
+                    gps_x = root.find('.//itemList/gpsX')
+                    gps_y = root.find('.//itemList/gpsY')
+                    
+                    if gps_x is not None and gps_y is not None and gps_x.text and gps_y.text:
+                        coordinates = {
+                            "gps_x": float(gps_x.text),
+                            "gps_y": float(gps_y.text),
+                            "coordinate_type": "gps"
+                        }
+                        print(f"  정류소 {station_id}: GPS 좌표 ({gps_x.text}, {gps_y.text}) 조회 성공")
+                        return coordinates
+            
+            # 2단계: 정류소명으로 좌표 조회 (tmX, tmY 사용)
+            if not coordinates and station_name:
+                url = 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByName'
+                params = {'serviceKey': self.service_key, 'stSrch': station_name}
+                
+                response = requests.get(url, params=params, timeout=5)
+                if response.status_code == 200:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(response.content.decode('utf-8'))
+                    
+                    # 첫 번째 매칭 결과 사용
+                    tm_x = root.find('.//itemList/tmX')
+                    tm_y = root.find('.//itemList/tmY')
+                    
+                    if tm_x is not None and tm_y is not None and tm_x.text and tm_y.text:
+                        coordinates = {
+                            "tm_x": float(tm_x.text),
+                            "tm_y": float(tm_y.text),
+                            "coordinate_type": "tm"
+                        }
+                        print(f"  정류소 '{station_name}': TM 좌표 ({tm_x.text}, {tm_y.text}) 조회 성공")
+                        return coordinates
+        
+        except Exception as e:
+            print(f"  정류소 좌표 조회 실패 (ID: {station_id}, 이름: {station_name}): {e}")
+        
+        return None
     def _get_bus_notices(self, page=1, per_page=5, max_retries=3):
         """버스 공지사항 목록 가져오기 (재시도 로직 포함)"""
         data = {
@@ -820,7 +874,7 @@ JSON 형식:
         return []
 
     def _enrich_station_info(self, station_info):
-        """정류장 정보 보강 (통제 범위에 따른 조건부 노선 정보 추가)"""
+        """정류장 정보 보강 (통제 범위에 따른 조건부 노선 정보 + 좌표 정보 추가)"""
         enriched_info = {}
         
         for station_id, info in station_info.items():
@@ -850,7 +904,21 @@ JSON 형식:
                     enriched_info[station_id] = enriched
                     continue
             
-            # 통제 범위에 따른 조건부 보강
+            # 좌표 정보 조회 및 추가 (새로 추가된 부분)
+            print(f"  정류소 '{station_name}' (ARS: {current_ars_id}): 좌표 조회 중...")
+            coordinates = self._get_station_coordinates(current_ars_id, station_name)
+            if coordinates:
+                enriched['coordinates'] = coordinates
+            else:
+                print(f"  정류소 '{station_name}': 좌표 조회 실패")
+                # 기본 좌표 (0, 0) 설정
+                enriched['coordinates'] = {
+                    "gps_x": 0.0,
+                    "gps_y": 0.0,
+                    "coordinate_type": "default"
+                }
+            
+            # 통제 범위에 따른 조건부 보강 (기존 로직)
             if control_scope == "전체통제":
                 # 전체 통제인 경우에만 API로 모든 노선 조회
                 if not affected_routes:
