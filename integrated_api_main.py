@@ -16,6 +16,8 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 import requests
+# integrated_api_main.py 상단에 추가
+import asyncio
 
 # .env 파일 로드
 try:
@@ -426,13 +428,13 @@ async def generate_and_send_kakao_callback_fixed(route_number: str, target_date:
             print(f"❌ 오류 콜백 전송도 실패: {e2}")
 
 async def initialize_crawler():
-    """크롤러 초기화"""
+    """크롤러 초기화 및 이미지 사전 생성"""
     global crawler, cached_notices, last_update
     
     if not CRAWLER_AVAILABLE:
         logger.warning("크롤러 모듈을 사용할 수 없습니다.")
         cached_notices = []
-        last_update = get_korean_time()  # 한국 시간으로 변경
+        last_update = get_korean_time()
         return
     
     try:
@@ -442,14 +444,132 @@ async def initialize_crawler():
         
         crawler = TOPISCrawler(gemini_api_key=gemini_api_key)
         cached_notices, cache_hit = crawler.crawl_notices()
-        last_update = get_korean_time()  # 한국 시간으로 변경
+        last_update = get_korean_time()
         
         logger.info(f"크롤러 초기화 완료. {len(cached_notices)}개 공지사항 로드됨")
+        
+        # 🚀 모든 노선 이미지 사전 생성
+        await generate_all_route_images_on_startup()
         
     except Exception as e:
         logger.error(f"크롤러 초기화 실패: {e}")
         cached_notices = []
-        last_update = get_korean_time()  # 한국 시간으로 변경
+        last_update = get_korean_time()
+
+
+async def generate_all_route_images_on_startup():
+    """서버 시작 시 모든 노선 이미지 사전 생성"""
+    try:
+        logger.info("🖼️ 모든 노선 이미지 사전 생성 시작...")
+        
+        total_generated = 0
+        total_existing = 0
+        total_failed = 0
+        
+        for notice in cached_notices:
+            route_pages = notice.get('route_pages', {})
+            route_images = notice.get('route_images', {})
+            attachments = notice.get('attachments', [])
+            
+            if not route_pages or not attachments:
+                continue
+            
+            notice_seq = notice['seq']
+            notice_title = notice.get('title', 'N/A')[:30]
+            
+            logger.info(f"📄 처리 중: {notice_title} ({len(route_pages)}개 노선)")
+            
+            for route_number in route_pages.keys():
+                try:
+                    # 이미 이미지가 있는지 확인
+                    if route_number in route_images:
+                        image_path = route_images[route_number]
+                        if image_path and os.path.exists(image_path):
+                            logger.info(f"  ✅ 노선 {route_number}: 기존 이미지 사용")
+                            total_existing += 1
+                            continue
+                    
+                    # 이미지 생성
+                    logger.info(f"  🔄 노선 {route_number}: 이미지 생성 중...")
+                    
+                    # 동기 함수를 비동기로 실행
+                    route_image_url = await asyncio.to_thread(
+                        generate_route_image_realtime_startup,
+                        route_number, notice
+                    )
+                    
+                    if route_image_url:
+                        logger.info(f"  ✅ 노선 {route_number}: 이미지 생성 완료")
+                        total_generated += 1
+                    else:
+                        logger.warning(f"  ❌ 노선 {route_number}: 이미지 생성 실패")
+                        total_failed += 1
+                    
+                    # CPU 부하 방지를 위한 잠시 대기
+                    await asyncio.sleep(0.5)
+                    
+                except Exception as e:
+                    logger.error(f"  ❌ 노선 {route_number} 이미지 생성 오류: {e}")
+                    total_failed += 1
+        
+        # 캐시 저장
+        if total_generated > 0:
+            await asyncio.to_thread(crawler._save_cache)
+        
+        logger.info(f"🎉 노선 이미지 사전 생성 완료!")
+        logger.info(f"  📊 통계: 신규생성 {total_generated}개, 기존사용 {total_existing}개, 실패 {total_failed}개")
+        
+    except Exception as e:
+        logger.error(f"❌ 노선 이미지 사전 생성 실패: {e}")
+
+
+def generate_route_image_realtime_startup(route_number: str, target_notice: Dict) -> Optional[str]:
+    """서버 시작용 노선 이미지 생성 (동기 버전)"""
+    try:
+        if not CRAWLER_AVAILABLE:
+            return None
+        
+        attachments = target_notice.get('attachments', [])
+        route_pages = target_notice.get('route_pages', {})
+        
+        if not attachments or route_number not in route_pages:
+            return None
+        
+        notice_seq = target_notice['seq']
+        page_num = route_pages[route_number]
+        
+        # 첫 번째 첨부파일만 처리
+        attachment = attachments[0]
+        file_path = crawler._download_attachment(attachment, save_to_folder=True)
+        
+        if file_path:
+            # HWP 변환 (필요시)
+            converted_path = crawler._convert_hwp_to_pdf(file_path)
+            
+            if converted_path.lower().endswith('.pdf'):
+                # 이미지 생성
+                image_path = crawler._convert_pdf_page_to_image(
+                    converted_path, page_num - 1, route_number, notice_seq
+                )
+                
+                if image_path and os.path.exists(image_path):
+                    # 캐시 업데이트 (메모리에서만)
+                    if 'route_images' not in target_notice:
+                        target_notice['route_images'] = {}
+                    target_notice['route_images'][route_number] = image_path
+                    
+                    # URL 생성
+                    filename = os.path.basename(image_path)
+                    base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
+                    image_url = f"{base_url}/topis_attachments/route_images/{filename}"
+                    
+                    return image_url
+        
+        return None
+        
+    except Exception as e:
+        print(f"❌ 시작용 이미지 생성 오류 (노선 {route_number}): {e}")
+        return None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -629,39 +749,20 @@ async def bus_info_webhook(req: Request):
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"버스 정보 조회 중 오류가 발생했습니다: {str(e)}"}}]}}
 
 @app.post("/webhook/route_image", tags=["카카오톡"])
-async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
-    """노선 우회 경로 이미지 전송 (초고속 응답)"""
+async def route_image_webhook(req: Request):
+    """노선 우회 경로 이미지 전송 (사전 생성된 이미지 사용)"""
     body = await req.json()
     
-    # 기본 검증만 최소한으로
+    if 'userRequest' not in body:
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "잘못된 요청입니다."}}]}}
+    
     params = body.get('action', {}).get('params', {})
     route_number = params.get('route_number', '').strip()
-    callback_url = body.get('userRequest', {}).get('callbackUrl')
+    target_date = params.get('date', '').strip()
     
     if not route_number:
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "노선 번호를 입력해주세요.\n예: 406, 143, 9401"}}]}}
     
-    # 콜백이 있으면 무조건 즉시 응답 (검색 생략)
-    if callback_url:
-        print(f"🚀 즉시 콜백 응답: 노선 {route_number}")
-        
-        # 백그라운드에서 모든 작업 처리
-        background_tasks.add_task(
-            handle_route_image_completely,
-            route_number, body, callback_url
-        )
-        
-        # **즉시 응답**
-        return {
-            "version": "2.0",
-            "useCallback": True,
-            "data": {
-                "text": f"🔄 노선 {route_number}번 이미지 생성 중...\n\n⏳ 잠시만 기다려주세요..."
-            }
-        }
-    
-    # 콜백이 없으면 기존 로직 (빠른 검색만)
-    target_date = params.get('date', '').strip()
     if not target_date:
         target_date = korean_date_string()
     
@@ -669,30 +770,38 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 서비스를 사용할 수 없습니다."}}]}}
     
     try:
-        # 빠른 검색 (기존 이미지만 확인)
         filtered_notices = crawler.filter_by_date(cached_notices, target_date)
         
+        # 해당 노선 정보 및 이미지 찾기
         for notice in filtered_notices:
+            route_pages = notice.get('route_pages', {})
             route_images = notice.get('route_images', {})
-            if route_number in route_images:
-                image_path = route_images[route_number]
-                if image_path and os.path.exists(image_path):
-                    filename = os.path.basename(image_path)
-                    base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                    route_image_url = f"{base_url}/static/route_images/{filename}"
-                    
-                    notice_title = notice.get('title', '제목 없음')
-                    detour_routes = notice.get('detour_routes', {})
-                    detour_path = detour_routes.get(route_number, '')
-                    
-                    info_text = f"🚌 노선 {route_number}번 우회 경로\n"
-                    info_text += f"📅 {target_date}\n\n"
-                    if notice_title:
-                        title_short = notice_title[:50] + '...' if len(notice_title) > 50 else notice_title
-                        info_text += f"📄 {title_short}\n"
-                    if detour_path:
-                        detour_short = detour_path[:60] + '...' if len(detour_path) > 60 else detour_path
-                        info_text += f"🔄 {detour_short}\n"
+            
+            if route_number in route_pages:
+                notice_title = notice.get('title', '제목 없음')
+                detour_routes = notice.get('detour_routes', {})
+                detour_path = detour_routes.get(route_number, '')
+                
+                # 이미지 URL 생성
+                route_image_url = None
+                if route_number in route_images:
+                    image_path = route_images[route_number]
+                    if image_path and os.path.exists(image_path):
+                        filename = os.path.basename(image_path)
+                        base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
+                        route_image_url = f"{base_url}/topis_attachments/route_images/{filename}"
+                
+                # 응답 구성
+                info_text = f"🚌 노선 {route_number}번 우회 경로\n"
+                info_text += f"📅 {target_date}\n\n"
+                if notice_title:
+                    title_short = notice_title[:50] + '...' if len(notice_title) > 50 else notice_title
+                    info_text += f"📄 {title_short}\n"
+                if detour_path:
+                    detour_short = detour_path[:60] + '...' if len(detour_path) > 60 else detour_path
+                    info_text += f"🔄 {detour_short}\n"
+                
+                if route_image_url:
                     info_text += "\n📍 자세한 우회 경로는 아래 이미지를 확인하세요."
                     
                     return {
@@ -709,15 +818,30 @@ async def route_image_webhook(req: Request, background_tasks: BackgroundTasks):
                             ]
                         }
                     }
+                else:
+                    info_text += "\n⚠️ 이미지를 준비 중입니다. 잠시 후 다시 시도해주세요."
+                    
+                    return {
+                        "version": "2.0",
+                        "template": {
+                            "outputs": [
+                                {
+                                    "simpleText": {
+                                        "text": info_text
+                                    }
+                                }
+                            ]
+                        }
+                    }
         
-        # 이미지가 없는 경우
+        # 해당 노선 정보가 없는 경우
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"🚌 노선 {route_number}번\n📅 {target_date}\n\n⚠️ 이미지를 준비 중입니다.\n잠시 후 다시 시도해주세요."
+                            "text": f"🚌 노선 {route_number}번\n📅 {target_date}\n\n❌ 해당 날짜에 통제 정보가 없습니다.\n다른 날짜나 노선번호를 확인해주세요."
                         }
                     }
                 ]
