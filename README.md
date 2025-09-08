@@ -415,6 +415,8 @@ curl "https://your-app-name.onrender.com/routes/406/controls?date=2025-09-09"
 
 **🚀 지금 바로 시작해보세요!** 한번의 배포로 서울시 모든 버스 정보를 카카오톡에서 실시간으로 확인할 수 있습니다!
 
+---
+
 # 🚌 서울 버스 통제 알림 시스템 (Restricted Bus Notice)
 
 서울시 버스 운행 변경 및 통제 정보를 자동으로 수집하고 조회할 수 있는 시스템입니다. FastAPI 기반의 REST API 서버로 웹, 모바일 등 다양한 플랫폼에서 활용 가능합니다.
