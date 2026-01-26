@@ -1,4 +1,12 @@
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import json
 import time
 import os
@@ -161,7 +169,36 @@ class TOPISCrawler:
             
             print(f"캐시 로드 완료: {len(cache_data['notices'])}개 게시물 ({len(notices_to_remove)}개 정리됨)")
             
+            # 캐시 데이터 보강 (이름이 없는 정류소 확인)
+            cache_updated = False
             if notices_to_remove:
+                cache_updated = True
+                
+            print("캐시 데이터 검증 및 보강 중...")
+            for seq, notice in cache_data["notices"].items():
+                station_info = notice.get('station_info', {})
+                if not station_info:
+                    continue
+                    
+                notice_updated = False
+                for station_id, info in station_info.items():
+                    name = info.get('name', '')
+                    if not name or name == "정보 없음" or name == "정보없음" or name == "정류소명 미기재":
+                        if station_id and station_id.isdigit() and len(station_id) == 5:
+                            print(f"  게시물 {seq} - 정류소 '{station_id}' 이름 보강 시도...")
+                            found_name = self.get_station_name_by_ars_id(station_id)
+                            if found_name:
+                                info['name'] = found_name
+                                notice_updated = True
+                                cache_updated = True
+                                print(f"  -> '{found_name}' 업데이트 완료")
+                                
+                if notice_updated:
+                    # 변경된 정보 저장
+                    notice['station_info'] = station_info
+            
+            if cache_updated:
+                print("보강된 캐시 데이터 저장 중...")
                 self._save_cache(cache_data)
             
             return cache_data
@@ -290,7 +327,7 @@ class TOPISCrawler:
                 url = 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid'
                 params = {'serviceKey': self.service_key, 'arsId': station_id}
                 
-                response = requests.get(url, params=params, timeout=5)
+                response = requests.get(url, params=params, timeout=5, verify=False)
                 if response.status_code == 200:
                     import xml.etree.ElementTree as ET
                     root = ET.fromstring(response.content.decode('utf-8'))
@@ -312,7 +349,7 @@ class TOPISCrawler:
                 url = 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByName'
                 params = {'serviceKey': self.service_key, 'stSrch': station_name}
                 
-                response = requests.get(url, params=params, timeout=5)
+                response = requests.get(url, params=params, timeout=5, verify=False)
                 if response.status_code == 200:
                     import xml.etree.ElementTree as ET
                     root = ET.fromstring(response.content.decode('utf-8'))
@@ -348,7 +385,7 @@ class TOPISCrawler:
         
         for attempt in range(max_retries):
             try:
-                response = self.session.post(f"{self.base_url}/notice/selectNoticeList.do", data=data)
+                response = self.session.post(f"{self.base_url}/notice/selectNoticeList.do", data=data, verify=False)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
@@ -368,7 +405,7 @@ class TOPISCrawler:
         
         for attempt in range(max_retries):
             try:
-                response = self.session.post(f"{self.base_url}/notice/selectNotice.do", data=data)
+                response = self.session.post(f"{self.base_url}/notice/selectNotice.do", data=data, verify=False)
                 response.raise_for_status()
                 result = response.json()
                 
@@ -410,7 +447,7 @@ class TOPISCrawler:
                 url = f"{self.base_url}/notice/selectNoticeFileDown.do"
                 data = {"bdwrSeq": attachment['bdwr_seq']}
                 
-                response = self.session.post(url, data=data)
+                response = self.session.post(url, data=data, verify=False)
                 response.raise_for_status()
                 
                 # JSON 응답인 경우 (Base64 인코딩된 파일)
@@ -516,6 +553,8 @@ class TOPISCrawler:
 - 시간 없으면 시작: 00:00, 종료: 23:59
 - 종료일 없으면 시작일과 동일
 
+통제 정류장명을 찾을 수 없으면 "정보없음"으로 기재하도록.
+
 JSON 형식:
 {{
   "control_type": "우회",
@@ -563,8 +602,15 @@ JSON 형식:
                         # HWP/HWPX 파일이면 PDF로 변환
                         converted_path = self._convert_hwp_to_pdf(file_path)
                         
-                        gemini_file = genai.upload_file(path=converted_path, display_name=attachment['name'])
-                        gemini_files.append(gemini_file)
+                        # Gemini가 지원하는 파일 형식인지 확인
+                        ext = os.path.splitext(converted_path)[1].lower()
+                        supported_exts = ['.pdf', '.png', '.jpg', '.jpeg', '.webp']
+                        
+                        if ext in supported_exts:
+                            gemini_file = genai.upload_file(path=converted_path, display_name=attachment['name'])
+                            gemini_files.append(gemini_file)
+                        else:
+                            print(f"  Gemini 미지원 파일 제외: {os.path.basename(converted_path)}")
                         
                         # 임시 파일 기록 (save_attachments=False인 경우만)
                         if not save_attachments:
@@ -885,6 +931,16 @@ JSON 형식:
             
             # ARS ID 검증 및 정규화
             current_ars_id = station_id
+
+            # 정류소명 보강 (정보 없음 또는 비어있는 경우)
+            if not station_name or station_name == "정보 없음" or station_name == "정보없음" or station_name == "정류소명 미기재":
+                 if current_ars_id and current_ars_id.isdigit() and len(current_ars_id) == 5:
+                     print(f"  정류소 '{current_ars_id}': 이름 조회 중...")
+                     found_name = self.get_station_name_by_ars_id(current_ars_id)
+                     if found_name:
+                         station_name = found_name
+                         enriched['name'] = found_name
+                         print(f"  정류소 '{current_ars_id}': 이름 '{station_name}' 발견 및 업데이트")
             
             # 5자리 숫자가 아니거나 비어있는 경우
             if not current_ars_id or not current_ars_id.isdigit() or len(current_ars_id) != 5:

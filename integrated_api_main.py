@@ -32,8 +32,10 @@ try:
     from restricted_bus import TOPISCrawler
     from position_checker import get_stations_by_position
     CRAWLER_AVAILABLE = True
-except ImportError:
-    print("⚠️ 크롤러 모듈을 찾을 수 없습니다. API 기능이 제한됩니다.")
+except ImportError as e:
+    import traceback
+    traceback.print_exc()
+    print(f"⚠️ 크롤러 모듈을 찾을 수 없습니다. API 기능이 제한됩니다. 오류: {e}")
     CRAWLER_AVAILABLE = False
 
 # 한국 시간대 설정
@@ -881,7 +883,7 @@ def normalize_route_number(route_input: str) -> str:
 # 2. 수정할 함수 (route_image_webhook)
 @app.post("/webhook/route_image", tags=["카카오톡"])
 async def route_image_webhook(req: Request):
-    """노선 우회 경로 이미지 전송 (사전 생성된 이미지 사용)"""
+    """노선 우회 경로 이미지 전송 (개선된 로직: 통제 정보 기반)"""
     body = await req.json()
     
     if 'userRequest' not in body:
@@ -904,130 +906,108 @@ async def route_image_webhook(req: Request):
         return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "현재 서비스를 사용할 수 없습니다."}}]}}
     
     try:
-        filtered_notices = crawler.filter_by_date(cached_notices, target_date)
+        # 개선된 로직: get_control_info_by_route 사용 (이미지 없어도 통제 정보 찾음)
+        controls = crawler.get_control_info_by_route(cached_notices, target_date, route_number)
         
-        # 해당 노선 정보 및 이미지 찾기
-        for notice in filtered_notices:
-            route_pages = notice.get('route_pages', {})
-            route_images = notice.get('route_images', {})
-            
-            if route_number in route_pages:
-                notice_title = notice.get('title', '제목 없음')
-                detour_routes = notice.get('detour_routes', {})
-                detour_path = detour_routes.get(route_number, '')
-                
-                # 영향 정류소 정보 수집 (수정됨)
-                station_info = notice.get('station_info', {})
-                affected_stations = []
-                all_periods = set()  # 통제기간 수집용
-                
-                for station_id, info in station_info.items():
-                    if route_number in info.get('affected_routes', []):
-                        station_name = info.get('name', '이름미상')
-                        affected_stations.append(station_name)
-                        
-                        # 통제기간 수집 (새로 추가된 부분)
-                        station_periods = info.get('periods', [])
-                        for period in station_periods:
-                            all_periods.add(period)
-                
-                # 전체 통제기간도 포함
-                general_periods = notice.get('general_periods', [])
-                for period in general_periods:
-                    all_periods.add(period)
-                
-                # 이미지 URL 생성
-                route_image_url = None
-                if route_number in route_images:
-                    image_path = route_images[route_number]
-                    if image_path and os.path.exists(image_path):
-                        filename = os.path.basename(image_path)
-                        base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
-                        route_image_url = f"{base_url}/static/route_images/{filename}"
-                
-                # 응답 구성 (수정됨)
-                info_text = f"🚌 노선 {route_number}번 우회 경로\n"
-                info_text += f"📅 {target_date}\n\n"
-                
-                if notice_title:
-                    title_short = notice_title[:50] + '...' if len(notice_title) > 50 else notice_title
-                    info_text += f"📄 {title_short}\n"
-                
-                # 통제기간 표시 (새로 추가된 부분)
-                if all_periods:
-                    periods_list = sorted(list(all_periods))
-                    if len(periods_list) == 1:
-                        info_text += f"⏰ 통제기간: {periods_list[0]}\n"
-                    else:
-                        # 여러 기간이 있는 경우 대표적인 것만 표시
-                        main_period = periods_list[0]
-                        info_text += f"⏰ 통제기간: {main_period}"
-                        if len(periods_list) > 1:
-                            info_text += f" 외 {len(periods_list)-1}개 구간\n"
-                        else:
-                            info_text += "\n"
-                
-                # 영향 정류소 표시 (수정됨)
-                if affected_stations:
-                    stations_str = ', '.join(affected_stations[:3])
-                    if len(affected_stations) > 3:
-                        stations_str += f" 외 {len(affected_stations)-3}곳"
-                    info_text += f"🚏 영향정류소: {stations_str}\n"
-                
-                # 우회 경로 표시 (수정됨)
-                if detour_path:
-                    detour_short = detour_path[:60] + '...' if len(detour_path) > 60 else detour_path
-                    info_text += f"🔄 우회: {detour_short}\n"
-                
-                if route_image_url:
-                    info_text += "\n📍 자세한 우회 경로는 아래 이미지를 확인하세요."
-                    
-                    return {
-                        "version": "2.0",
-                        "template": {
-                            "outputs": [
-                                {"simpleText": {"text": info_text}},
-                                {
-                                    "simpleImage": {
-                                        "imageUrl": route_image_url,
-                                        "altText": f"{route_number}번 버스 우회 경로"
-                                    }
-                                }
-                            ]
+        if not controls:
+            return {
+                "version": "2.0",
+                "template": {
+                    "outputs": [
+                        {
+                            "simpleText": {
+                                "text": f"🚌 노선 {route_number}번\n📅 {target_date}\n\n❌ 해당 날짜에 통제 정보가 없습니다.\n다른 날짜나 노선번호를 확인해주세요."
+                            }
                         }
-                    }
-                else:
-                    info_text += "\n⚠️ 이미지를 준비 중입니다. 잠시 후 다시 시도해주세요."
-                    
-                    return {
-                        "version": "2.0",
-                        "template": {
-                            "outputs": [
-                                {
-                                    "simpleText": {
-                                        "text": info_text
-                                    }
-                                }
-                            ]
-                        }
-                    }
-        
-        # 해당 노선 정보가 없는 경우
-        return {
-            "version": "2.0",
-            "template": {
-                "outputs": [
-                    {
-                        "simpleText": {
-                            "text": f"🚌 노선 {route_number}번\n📅 {target_date}\n\n❌ 해당 날짜에 통제 정보가 없습니다.\n다른 날짜나 노선번호를 확인해주세요."
-                        }
-                    }
-                ]
+                    ]
+                }
             }
-        }
+            
+        # 첫 번째 통제 정보 사용 (대부분 하나임)
+        control = controls[0]
+        notice_title = control.get('notice_title', '')
+        detour_path = control.get('detour_path', '')
+        route_image_path = control.get('route_image')
         
+        # 응답 텍스트 구성
+        info_text = f"🚌 노선 {route_number}번 우회 경로\n"
+        info_text += f"📅 {target_date}\n\n"
+        
+        if notice_title:
+            title_short = notice_title[:50] + '...' if len(notice_title) > 50 else notice_title
+            info_text += f"📄 {title_short}\n"
+            
+        # 통제기간
+        periods = control.get('periods', [])
+        if periods:
+            unique_periods = sorted(list(set(periods)))
+            if len(unique_periods) == 1:
+                info_text += f"⏰ 통제기간: {unique_periods[0]}\n"
+            else:
+                main_period = unique_periods[0]
+                info_text += f"⏰ 통제기간: {main_period}"
+                if len(unique_periods) > 1:
+                    info_text += f" 외 {len(unique_periods)-1}개 구간\n"
+                else:
+                    info_text += "\n"
+        
+        # 영향 정류소
+        affected_stations = control.get('affected_stations', [])
+        if affected_stations:
+            station_names = [s.get('station_name', '이름미상') for s in affected_stations]
+            # 중복 제거
+            station_names = sorted(list(set(station_names)))
+            
+            stations_str = ', '.join(station_names[:3])
+            if len(station_names) > 3:
+                stations_str += f" 외 {len(station_names)-3}곳"
+            info_text += f"🚏 영향정류소: {stations_str}\n"
+
+        # 우회 경로
+        if detour_path:
+            detour_short = detour_path[:60] + '...' if len(detour_path) > 60 else detour_path
+            info_text += f"🔄 우회: {detour_short}\n"
+        
+        # 이미지 URL 및 응답
+        if route_image_path and os.path.exists(route_image_path):
+            filename = os.path.basename(route_image_path)
+            base_url = os.getenv("RENDER_EXTERNAL_URL", "https://restricted-bus-notice.onrender.com")
+            route_image_url = f"{base_url}/static/route_images/{filename}"
+            
+            info_text += "\n📍 자세한 우회 경로는 아래 이미지를 확인하세요."
+            
+            return {
+                "version": "2.0",
+                "template": {
+                    "outputs": [
+                        {"simpleText": {"text": info_text}},
+                        {
+                            "simpleImage": {
+                                "imageUrl": route_image_url,
+                                "altText": f"{route_number}번 버스 우회 경로"
+                            }
+                        }
+                    ]
+                }
+            }
+        else:
+            info_text += "\n⚠️ 이미지를 준비 중이거나 제공되지 않는 노선입니다.\n(텍스트 정보는 위 내용을 참고하세요)"
+            
+            return {
+                "version": "2.0",
+                "template": {
+                    "outputs": [
+                        {
+                            "simpleText": {
+                                "text": info_text
+                            }
+                        }
+                    ]
+                }
+            }
+            
     except Exception as e:
-        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"이미지 조회 중 오류: {str(e)}"}}]}}
+        return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": f"조회 중 오류가 발생했습니다: {str(e)}"}}]}}
 
 
 # 3. 수정할 함수 (route_check_webhook)
